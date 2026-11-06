@@ -9,6 +9,7 @@ const sample = (): Project => ({
   name: 'Sign',
   units: 'in',
   bits: { rough: '1/8-endmill', detail: '90-vbit' },
+  bitOrder: ['rough', 'detail'],
   cutSettings: { ...newProject().cutSettings, detail: { ...newProject().cutSettings.rough, feed: 900 } },
   cutSettingsCustom: { rough: false, detail: true },
   bitOverrides: { rough: { diameter: 3 }, detail: { angle: 60, flat: 0.5 } },
@@ -21,7 +22,7 @@ const sample = (): Project => ({
   ],
 })
 
-const file = (project: unknown, extra = {}) => JSON.stringify({ format: 'opencarve', version: 4, project, ...extra })
+const file = (project: unknown, extra = {}) => JSON.stringify({ format: 'opencarve', version: 8, project, ...extra })
 
 // A fresh project with a detail bit and one carved shape of every type.
 const everyShape = (): Project => {
@@ -31,7 +32,9 @@ const everyShape = (): Project => {
   return {
     ...p,
     bits: { rough: '1/8-endmill', detail: '90-vbit' },
+    bitOrder: ['rough', 'detail'],
     cutSettings: { ...p.cutSettings, detail: p.cutSettings.rough },
+    cutSettingsCustom: { rough: false, detail: false },
     shapes: [
       { ...base, id: 'r', type: 'rect', name: 'Rect', w: 5, h: 5 },
       { ...base, id: 'e', type: 'ellipse', name: 'Ellipse', w: 5, h: 5 },
@@ -47,6 +50,36 @@ test('round-trips a project', () => {
   for (const p of [sample(), everyShape()]) expect(parseProject(serializeProject(p))).toEqual(p)
 })
 
+test('round-trips Bézier path nodes and accepts v7 polylines', () => {
+  const p = sample()
+  const path = p.shapes.find((s) => s.type === 'path')!
+  if (path.type !== 'path') throw new Error('expected a path')
+  path.nodes = [{ point: [0, 0], out: [2, 4] }, { point: [9, 9], in: [7, 5] }]
+  expect(parseProject(serializeProject(p))).toEqual(p)
+  const v7 = JSON.parse(serializeProject(p))
+  v7.version = 7
+  delete v7.project.shapes.find((s: { type: string }) => s.type === 'path').nodes
+  const migrated = parseProject(JSON.stringify(v7))
+  expect(migrated.shapes.find((s) => s.type === 'path')).not.toHaveProperty('nodes')
+  const broken = JSON.parse(serializeProject(p))
+  broken.project.shapes.find((s: { type: string }) => s.type === 'path').nodes[0].point = [0, 'bad']
+  expect(() => parseProject(JSON.stringify(broken))).toThrow('shapes[3].nodes[0].point has a bad point')
+})
+
+test('round-trips an ordered extensible bit list and validates its order', () => {
+  const p = sample()
+  const role = 'tool-fine' as const
+  p.bits[role] = '1mm-endmill'
+  p.bitOrder.push(role)
+  p.cutSettings[role] = { ...p.cutSettings.rough, feed: 400 }
+  p.cutSettingsCustom[role] = true
+  p.shapes[0].cut = { ...p.shapes[0].cut!, type: 'pocket', bit: role }
+  expect(parseProject(serializeProject(p))).toEqual(p)
+  for (const bitOrder of [['rough', 'detail'], ['detail', 'rough', role], ['rough', role, role]]) {
+    expect(() => parseProject(file({ ...p, bitOrder }))).toThrow(/bitOrder must contain every configured bit exactly once/)
+  }
+})
+
 // Deletes a field at a message-style path (e.g. shapes[4].font); top-level scalars are reported as project.<key>.
 const without = (p: Project, path: string) => {
   const data = JSON.parse(serializeProject(p))
@@ -58,23 +91,24 @@ const without = (p: Project, path: string) => {
 
 test('a missing field is rejected with its path', () => {
   const paths = [
-    'project.name', 'project.units', 'project.materialId', 'machine', 'bits', 'bitOverrides',
+    'project.name', 'project.units', 'project.materialId', 'machine', 'bits', 'bitOrder', 'bitOverrides',
     'cutSettings', 'cutSettings.rough', 'cutSettings.detail', 'cutSettings.rough.feed', 'cutSettings.detail.direction',
     'cutSettingsCustom', 'cutSettingsCustom.rough', 'cutSettingsCustom.detail',
     'origin', 'origin.preset', 'origin.x', 'origin.y', 'origin.z',
     'gcode', 'gcode.header', 'gcode.footer', 'gcode.replaceDefaults',
     ...['name', 'rotation'].map((k) => `shapes[0].${k}`), 'shapes[2].sides', 'shapes[3].closed', 'shapes[5].paths[0].closed',
     ...['font', 'letterSpacing', 'lineHeight', 'align', 'arc', 'mirror'].map((k) => `shapes[4].${k}`),
-    ...['type', 'bit', 'pocketPattern', 'pocketAngle', 'side', 'depth', 'tabs', 'tabCount', 'tabWidth', 'tabHeight'].map((k) => `shapes[1].cut.${k}`),
+    ...['type', 'bit', 'pocketPattern', 'pocketAngle', 'pocketPrecut', 'side', 'depth', 'tabs', 'tabCount', 'tabWidth', 'tabHeight'].map((k) => `shapes[1].cut.${k}`),
   ]
   expect(() => parseProject(without(everyShape(), 'project.id'))).toThrow('Invalid project file: project.id is missing')
+  expect(() => parseProject(without(everyShape(), 'bitOrder'))).toThrow('Invalid project file: bitOrder is missing')
   for (const path of paths) expect(() => parseProject(without(everyShape(), path)), path).toThrow(`Invalid project file: ${path} is missing`)
   // cut and fillRule are optional by design: no cut means not carved, no fillRule means non-zero.
   const plain = parseProject(without(everyShape(), 'shapes[0].cut'))
   expect(plain.shapes[0]).not.toHaveProperty('cut')
   expect(plain.shapes[0]).not.toHaveProperty('fillRule')
-  // cutSettings.detail exists exactly when there is a detail bit.
-  expect(() => parseProject(without(everyShape(), 'bits.detail'))).toThrow('Invalid project file: cutSettings.detail is present without a detail bit')
+  // Every configured bit must appear exactly once in the ordered tool list.
+  expect(() => parseProject(without(everyShape(), 'bits.detail'))).toThrow('Invalid project file: bitOrder must contain every configured bit exactly once, with rough first')
 })
 
 test('custom G-code: printable ASCII, tabs and line breaks, no G20/G91/G93 in the header, at most 20 000 characters', () => {
@@ -92,7 +126,7 @@ test('custom G-code: printable ASCII, tabs and line breaks, no G20/G91/G93 in th
 
 test('work zero: round-trips, validates and clamps', () => {
   const p = { ...sample(), origin: { preset: 'custom' as const, x: 12.5, y: 40, z: 'bottom' as const } }
-  expect(JSON.parse(serializeProject(p)).version).toBe(4)
+  expect(JSON.parse(serializeProject(p)).version).toBe(8)
   expect(parseProject(serializeProject(p))).toEqual(p)
   const legacy = JSON.parse(serializeProject(p))
   legacy.version = 2
@@ -111,7 +145,21 @@ test('work zero: round-trips, validates and clamps', () => {
     delete shape.cut.pocketAngle
   }
   expect(parseProject(JSON.stringify(v3))).toEqual(p)
+  const v4 = JSON.parse(serializeProject(p))
+  v4.version = 4
+  expect(parseProject(JSON.stringify(v4))).toEqual(p)
+  const v5 = JSON.parse(serializeProject(p))
+  v5.version = 5
+  delete v5.project.bitOrder
+  expect(parseProject(JSON.stringify(v5))).toEqual(p)
+  const v6 = JSON.parse(serializeProject(p))
+  v6.version = 6
+  for (const shape of v6.project.shapes) if (shape.cut) delete shape.cut.pocketPrecut
+  expect(parseProject(JSON.stringify(v6))).toEqual(p)
   const old = sample()
+  const v7 = JSON.parse(serializeProject(p))
+  v7.version = 7
+  expect(parseProject(JSON.stringify(v7))).toEqual(p)
   expect(() => parseProject(file(p, { version: 1 }))).toThrow('unsupported version 1')
   // Presets are re-derived from the stock.
   expect(parseProject(file({ ...old, origin: { preset: 'center', x: 1, y: 2, z: 'top' } })).origin).toMatchObject({ x: 150, y: 100 })
@@ -129,7 +177,7 @@ test('work zero: round-trips, validates and clamps', () => {
 test('rejects garbage', () => {
   expect(() => parseProject('not json')).toThrow(/not JSON/)
   expect(() => parseProject('{"format":"svg"}')).toThrow(/not an OpenCarve project/)
-  expect(() => parseProject(file(sample(), { version: 5 }))).toThrow('Invalid project file: unsupported version 5 (this app reads version 4)')
+  expect(() => parseProject(file(sample(), { version: 9 }))).toThrow('Invalid project file: unsupported version 9 (this app reads version 8)')
   expect(() => parseProject(file({ ...sample(), shapes: 'x' }))).toThrow(/shapes must be an array/)
   expect(() => parseProject(file({ ...sample(), stock: { w: NaN, h: 1, thickness: 1 } }))).toThrow(/stock.w/)
   expect(() => parseProject(file({ ...sample(), shapes: [{ id: 'z', type: 'blob', x: 0, y: 0 }] }))).toThrow(/shapes\[0\].type/)
@@ -141,6 +189,7 @@ test('validates cuts', () => {
   const p = parseProject(file({ ...sample(), stock: { w: 100, h: 80, thickness: 6 }, shapes: [rect] }))
   expect(p.shapes[0]).toMatchObject({ cut: { type: 'pocket', depth: 6, tabCount: 1, pocketPattern: 'raster', pocketAngle: 45 } })
   expect(() => parseProject(file({ ...sample(), shapes: [{ ...rect, cut: { ...rect.cut, bit: 'laser' } }] }))).toThrow(/cut.bit/)
+  expect(() => parseProject(file({ ...sample(), shapes: [{ ...rect, cut: { ...rect.cut, pocketPattern: 'waves' } }] }))).toThrow(/cut.pocketPattern/)
 })
 
 test('rejects unknown bits and invalid cut settings', () => {
@@ -229,7 +278,9 @@ test('validates bit overrides, dropping bad ones with a warning', () => {
     file({
       ...sample(),
       bits: { rough: '1/8-endmill' },
+      bitOrder: ['rough'],
       cutSettings: { rough: newProject().cutSettings.rough },
+      cutSettingsCustom: { rough: false },
       bitOverrides: { rough: { diameter: 6, bogus: 1 }, detail: { diameter: 2 }, laser: { diameter: 1 } },
     }),
     warnings,

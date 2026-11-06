@@ -4,15 +4,16 @@ import { opKey, opShapeIds, type Op } from './cam/toolpath'
 import { icons } from './icons'
 import { effectiveBit, findMaterial } from './lib/library'
 import { formatLength } from './lib/units'
-import { gcodeHeaderWarnings, type BitRole, type Cut } from './model'
+import { bitRoleLabel, configuredBitRoles, gcodeHeaderWarnings, type BitRole, type Cut } from './model'
 import { timelineFor } from './preview/timeline'
 import { useAppStore } from './store'
 
 export const mmss = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`
-export const ROLE_LABEL: Record<BitRole, string> = { rough: 'Rough', detail: 'Detail' }
+export const roleLabel = (project: Parameters<typeof bitRoleLabel>[0], role: BitRole) => bitRoleLabel(project, role)
 const SIDE_LABEL: Record<Cut['side'], string> = { outside: 'Outline outside', inside: 'Outline inside', on: 'Outline on path' }
 const KIND_LABEL: Record<Exclude<Op['kind'], 'outline'>, string> = {
   pocket: 'Pocket',
+  'pocket-edge': 'Pocket edge pre-cut',
   'pocket-detail': 'Pocket detail',
   vcarve: 'V-carve',
   'vcarve-clear': 'V-carve clearing',
@@ -20,16 +21,16 @@ const KIND_LABEL: Record<Exclude<Op['kind'], 'outline'>, string> = {
 
 export function Summary() {
   const project = useAppStore((s) => s.project)
-  const { materialId, stock, bits, units, origin } = project
+  const { materialId, stock, units, origin } = project
   const cam = useAppStore((s) => s.cam)
   const busy = useAppStore((s) => s.camBusy)
   const len = (mm: number) => formatLength(mm, units)
   const rows: [string, string][] = [
     ['Material', findMaterial(materialId).name],
     ['Stock', `${len(stock.w)} × ${len(stock.h)} × ${len(stock.thickness)} ${units}`],
-    ...(['rough', 'detail'] as const).flatMap((role): [string, string][] => (bits[role] ? [[`${ROLE_LABEL[role]} bit`, effectiveBit(project, role).name]] : [])),
+    ...configuredBitRoles(project).map((role): [string, string] => [`${roleLabel(project, role)} bit`, effectiveBit(project, role).name]),
     ['Work zero', `${origin.preset === 'custom' ? `custom (${len(origin.x)}, ${len(origin.y)} ${units} from bottom-left)` : xyZeroLabel(project)}, Z at ${origin.z}`],
-    ['Time', busy || !cam ? 'Calculating…' : `about ${mmss(cam.timeSec.rough + cam.timeSec.detail)}`],
+    ['Time', busy || !cam ? 'Calculating…' : `about ${mmss(Object.values(cam.timeSec).reduce<number>((a, b) => a + (b ?? 0), 0))}`],
   ]
   return (
     <dl className="summary">
@@ -69,7 +70,8 @@ export function Warnings() {
 }
 
 export default function SimulatePanel() {
-  const shapes = useAppStore((s) => s.project.shapes)
+  const project = useAppStore((s) => s.project)
+  const shapes = project.shapes
   const cam = useAppStore((s) => s.cam)
   const selection = useAppStore((s) => s.selection)
   const busy = useAppStore((s) => s.camBusy)
@@ -106,7 +108,7 @@ export default function SimulatePanel() {
                   <span className="op-name">{opShapes.map((s) => s.name).join(' + ')}</span>
                   <span className="op-time">{mmss(op.timeSec ?? 0)}</span>
                   <span className="op-kind">
-                    {op.kind === 'outline' ? SIDE_LABEL[shape?.cut?.side ?? 'on'] : KIND_LABEL[op.kind]} · {ROLE_LABEL[op.role]} bit
+                    {op.kind === 'outline' ? SIDE_LABEL[shape?.cut?.side ?? 'on'] : KIND_LABEL[op.kind]} · {roleLabel(project, op.role)} bit
                   </span>
                 </button>
               </li>

@@ -52,7 +52,7 @@ test('saves as a .oc file', async ({ page }) => {
   const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Save as file' }).click()])
   expect(download.suggestedFilename()).toBe('Test.oc')
   const json = JSON.parse(Buffer.concat(await (await download.createReadStream()).toArray()).toString())
-  expect(json).toMatchObject({ format: 'opencarve', version: 4, project: { name: 'Test', shapes: [{ type: 'rect' }] } })
+  expect(json).toMatchObject({ format: 'opencarve', version: 8, project: { name: 'Test', shapes: [{ type: 'rect' }] } })
 })
 
 test('opens a .oc file with text and plans its toolpaths', async ({ page }) => {

@@ -2,10 +2,11 @@ import { useId, useRef, useState, type ReactNode } from 'react'
 import { FontPicker } from './FontPicker'
 import { loadFont } from './lib/fonts'
 import { fitText, localBounds, scaleShape, textAtSize } from './lib/geometry'
+import { positiveReliefShape } from './lib/geometry'
 import { xyZeroLabel, zZeroLabel } from './cam/gcode'
 import { effectiveBit, findBit, findMaterial, vbitMaxDepth, vcarveBit } from './lib/library'
 import { formatLength, parseLength } from './lib/units'
-import { isOpen, tabsActive, type Cut, type Shape, type TextShape } from './model'
+import { bitRoleLabel, configuredBitRoles, isOpen, tabsActive, type BitRole, type Cut, type Shape, type TextShape } from './model'
 import { useAppStore } from './store'
 
 // `live` commits on every keystroke; the whole focus session is a single undo entry.
@@ -107,11 +108,15 @@ function CutSection({ selected }: { selected: Shape[] }) {
   const cuts = selected.map((s) => s.cut)
   const carved = cuts.every((c) => c)
   const open = selected.some(isOpen)
-  const vbit = [bits.rough, bits.detail].some((id) => id && findBit(id).type === 'vbit')
+  const roles = configuredBitRoles(project)
+  const pocketBits = roles.filter((role) => effectiveBit(project, role).type !== 'vbit')
+  const pocketDiameters = pocketBits.map((role) => effectiveBit(project, role).diameter)
+  const canPrecut = pocketBits.length > 1 && Math.max(...pocketDiameters) > Math.min(...pocketDiameters) + 1e-9
+  const vbit = roles.some((role) => findBit(bits[role]!).type === 'vbit')
   const type = shared((s) => s.cut?.type ?? 'none')
   const vcarve = type === 'vcarve'
   const bitChoice = shared((s) => s.cut?.bit ?? '')
-  const roleBit = bitChoice === 'rough' || (bitChoice === 'detail' && bits.detail) ? effectiveBit(project, bitChoice) : null
+  const roleBit = bitChoice !== 'auto' && bits[bitChoice as BitRole] ? effectiveBit(project, bitChoice as BitRole) : null
   const vBit = bitChoice === 'auto' || !bitChoice ? vcarveBit(project) : roleBit?.type === 'vbit' ? roleBit : null
   const maxDepth = vcarve ? Math.min(t - 0.5, vBit ? vbitMaxDepth(vBit) : t - 0.5) : t
   const through = !vcarve && cuts.every((c) => c && c.depth >= t)
@@ -140,7 +145,7 @@ function CutSection({ selected }: { selected: Shape[] }) {
           { value: 'vcarve', label: 'V-carve', disabled: open || !vbit },
           { value: 'none', label: 'None' },
         ]}
-        hint={open ? 'Open paths can only be cut along the path.' : vbit ? undefined : 'V-carve needs a V-bit as the rough or detail bit.'}
+        hint={open ? 'Open paths can only be cut along the path.' : vbit ? undefined : 'V-carve needs a configured V-bit.'}
         onChange={(v) =>
           setCut(
             v === 'none'
@@ -154,30 +159,53 @@ function CutSection({ selected }: { selected: Shape[] }) {
         }
       />
       {carved && (
-        <Segmented
-          label="Bit usage"
-          value={bitChoice}
-          options={[
-            { value: 'auto', label: 'Automatic' },
-            { value: 'rough', label: 'Rough only', disabled: vcarve && findBit(bits.rough).type !== 'vbit' },
-            { value: 'detail', label: 'Detail only', disabled: !bits.detail || (vcarve && findBit(bits.detail).type !== 'vbit') },
-          ]}
-          hint="Automatic keeps the normal two-stage behaviour; choosing one bit generates this shape only in that bit's G-code."
-          onChange={(bit) => setCut({ bit })}
-        />
+        <label className="field wide">
+          <span>Bit usage</span>
+          <select value={bitChoice} onChange={(e) => setCut({ bit: e.target.value as Cut['bit'] })}>
+            <option value="auto">Automatic (multi-bit)</option>
+            {roles.map((role) => (
+              <option key={role} value={role} disabled={vcarve && findBit(bits[role]!).type !== 'vbit'}>
+                {bitRoleLabel(project, role)} only · {effectiveBit(project, role).name}
+              </option>
+            ))}
+          </select>
+          <small>Automatic uses every compatible bit in sequence; choosing one bit puts this shape only in that bit's G-code.</small>
+        </label>
       )}
       {type === 'pocket' && (
         <>
-          <Segmented
-            label="Pocket pattern"
-            value={shared((s) => s.cut?.pocketPattern ?? '')}
-            options={[
-              { value: 'concentric', label: 'Concentric' },
-              { value: 'raster', label: 'Parallel lines' },
-            ]}
-            onChange={(pocketPattern) => setCut({ pocketPattern })}
-          />
-          {cuts.every((c) => c?.pocketPattern === 'raster') && (
+          <label className="check wide">
+            <input
+              type="checkbox"
+              aria-label="Pre-cut pocket edges"
+              checked={cuts.every((c) => !!c?.pocketPrecut)}
+              disabled={bitChoice !== 'auto' || !canPrecut}
+              onChange={(e) => setCut({ pocketPrecut: e.target.checked })}
+            />
+            Pre-cut edges with the smallest bit
+          </label>
+          <p className="hint">
+            {!canPrecut
+              ? 'Configure at least two different-sized non-V bits to pre-cut edges.'
+              : bitChoice !== 'auto'
+                ? 'Edge pre-cutting requires Automatic bit usage.'
+                : 'Run the smallest-bit file first to score outer walls and inner islands before larger bits clear the pocket.'}
+          </p>
+          <label className="field wide">
+            <span>Pocket pattern</span>
+            <select
+              aria-label="Pocket pattern"
+              value={shared((s) => s.cut?.pocketPattern ?? '')}
+              onChange={(e) => setCut({ pocketPattern: e.target.value as Cut['pocketPattern'] })}
+            >
+              <option value="concentric">Concentric</option>
+              <option value="raster">Parallel lines</option>
+              <option value="crosshatch">Crosshatch</option>
+              <option value="spiral">Spiral</option>
+              <option value="radial">Radial</option>
+            </select>
+          </label>
+          {cuts.every((c) => c?.pocketPattern === 'raster' || c?.pocketPattern === 'crosshatch' || c?.pocketPattern === 'radial') && (
             <>
               <div className="fields">
                 <Field
@@ -190,7 +218,7 @@ function CutSection({ selected }: { selected: Shape[] }) {
                   }}
                 />
               </div>
-              <p className="hint">0° is horizontal; angles turn counter-clockwise.</p>
+              <p className="hint">0° is horizontal; angles turn counter-clockwise. Crosshatch adds a perpendicular pass.</p>
             </>
           )}
         </>
@@ -265,13 +293,12 @@ function CutSection({ selected }: { selected: Shape[] }) {
 
 function ProjectSummary() {
   const project = useAppStore((s) => s.project)
-  const { stock, units, bits } = project
+  const { stock, units } = project
   const len = (mm: number) => formatLength(mm, units)
   const rows: [string, string][] = [
     ['Material', findMaterial(project.materialId).name],
     ['Stock', `${len(stock.w)} × ${len(stock.h)} × ${len(stock.thickness)} ${units}`],
-    ['Rough bit', effectiveBit(project, 'rough').name],
-    ...(bits.detail ? [['Detail bit', effectiveBit(project, 'detail').name] as [string, string]] : []),
+    ...configuredBitRoles(project).map((role): [string, string] => [`${bitRoleLabel(project, role)} bit`, effectiveBit(project, role).name]),
     ['Work zero', `${xyZeroLabel(project)}, Z at ${zZeroLabel(project)}`],
     ['Machine', project.machine.name],
   ]
@@ -325,6 +352,7 @@ export default function Inspector() {
     patch.text?.trim() !== '' && update((s) => (s.type === 'text' ? fitText({ ...s, ...patch }) : s))
   const textValue = (f: (s: TextShape) => string) => shared((s) => (s.type === 'text' ? f(s) : ''))
   const bend = textValue((s) => String(s.arc))
+  const canMakePositiveRelief = selected.length > 1 && !!positiveReliefShape(selected, 'preview', project.stock.thickness)
 
   return (
     <>
@@ -432,6 +460,18 @@ export default function Inspector() {
           </>
         )}
       </div>
+      {selected.length > 1 && (
+        <Section title="Positive relief">
+          <button className="wide-action" disabled={!canMakePositiveRelief} onClick={() => st().makePositiveRelief()}>
+            Make positive relief
+          </button>
+          <p className="hint">
+            {canMakePositiveRelief
+              ? 'The largest selected shape becomes the pocket; contained shapes stay as full-height islands.'
+              : 'Select one closed outer shape and one or more fully contained closed shapes.'}
+          </p>
+        </Section>
+      )}
       <CutSection selected={selected} />
     </>
   )

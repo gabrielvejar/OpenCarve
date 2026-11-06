@@ -1,4 +1,4 @@
-import type { Bit, BitOverride, BitRole, CutSettings, Material, Project } from '../model'
+import { configuredBitRoles, type Bit, type BitOverride, type BitRole, type CutSettings, type Material, type Project } from '../model'
 
 export const BITS: Bit[] = [
   { id: '1mm-endmill', name: '1 mm endmill', type: 'endmill', diameter: 1 },
@@ -51,9 +51,17 @@ export function effectiveBit(p: Pick<Project, 'bits' | 'bitOverrides'>, role: Bi
   return { ...b, name: `${bit.name} (custom ${bitGeometry(b)})` }
 }
 
-// The V-bit a V-carve uses (the detail role's wins), overrides applied; null without one.
-export function vcarveBit(p: Pick<Project, 'bits' | 'bitOverrides'>): Bit | null {
-  const role = (['detail', 'rough'] as const).find((r) => p.bits[r] && findBit(p.bits[r]).type === 'vbit')
+// Physical tool-change order: ordinary cutters widest first, then V-bits. Ties keep the configured order.
+export function machiningBitRoles(p: Pick<Project, 'bits' | 'bitOrder' | 'bitOverrides'>): BitRole[] {
+  return configuredBitRoles(p)
+    .map((role, index) => ({ role, index, bit: effectiveBit(p, role) }))
+    .sort((a, b) => Number(a.bit.type === 'vbit') - Number(b.bit.type === 'vbit') || b.bit.diameter - a.bit.diameter || a.index - b.index)
+    .map(({ role }) => role)
+}
+
+// The last configured V-bit finishes an automatic V-carve, preserving the old detail-before-rough preference.
+export function vcarveBit(p: Pick<Project, 'bits' | 'bitOverrides' | 'bitOrder'>): Bit | null {
+  const role = [...p.bitOrder].reverse().find((r) => p.bits[r] && findBit(p.bits[r]!).type === 'vbit')
   return role ? effectiveBit(p, role) : null
 }
 

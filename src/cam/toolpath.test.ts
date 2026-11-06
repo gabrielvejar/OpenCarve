@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { parse } from 'opentype.js'
 import { describe, expect, it } from 'vitest'
 import { glyphPolylines } from '../lib/fonts'
+import { positiveReliefShape } from '../lib/geometry'
 import { findBit, findMaterial, recommendedSettings } from '../lib/library'
 import { defaultCut, gcodeHeaderWarnings, newProject, type CompoundShape, type Point, type Project, type RectShape, type Shape } from '../model'
 import { toGcode } from './gcode'
@@ -28,6 +29,17 @@ describe('regions', () => {
     const areas = shapeRegion(shape).map(area).sort((a, b) => a - b)
     expect(areas[0]).toBeCloseTo(-100)
     expect(areas[1]).toBeCloseTo(400)
+  })
+  it('positive relief pockets the outer area while preserving the inner island', () => {
+    const outer = rect(40, 40)
+    const inner = { ...rect(12, 12), id: 'i', name: 'Island' }
+    const relief = positiveReliefShape([outer, inner], 'relief', 12)
+    expect(relief).not.toBeNull()
+    const region = shapeRegion(relief!)
+    const filled = (x: number, y: number) =>
+      region.reduce((w, path) => w + (pointInPolygonD({ x, y }, path) === PointInPolygonResult.IsInside ? Math.sign(area(path)) : 0), 0) > 0
+    expect(filled(35, 50)).toBe(true)
+    expect(filled(50, 50)).toBe(false)
   })
 })
 
@@ -109,24 +121,58 @@ function regionProbe(shape: Shape) {
 }
 
 // Samples every XY feed move at depth: all of it must stay at least r inside the pocket.
-function assertInsideWall(shape: Shape, bit: string) {
-  const p = project([{ ...shape, cut: { ...defaultCut(12), type: 'pocket', depth: 3 } }], bit)
+function assertSegmentsInsideWall(shape: Shape, op: Op, bit: string, samples = 10) {
   const r = findBit(bit).diameter / 2
   const { dist, insideRegion } = regionProbe(shape)
   let prev: Pt3 | null = null
   let checked = 0
-  for (const seg of planProject(p).ops[0].segments) {
+  for (const seg of op.segments) {
     for (const q of seg.points) {
       if (prev && !seg.rapid && q[2] < 0 && (q[0] !== prev[0] || q[1] !== prev[1])) {
-        for (let k = 0; k <= 10; k++) {
-          const x = prev[0] + ((q[0] - prev[0]) * k) / 10
-          const y = prev[1] + ((q[1] - prev[1]) * k) / 10
+        for (let k = 0; k <= samples; k++) {
+          const x = prev[0] + ((q[0] - prev[0]) * k) / samples
+          const y = prev[1] + ((q[1] - prev[1]) * k) / samples
           expect(insideRegion(x, y)).toBe(true)
-          expect(dist(x, y)).toBeGreaterThan(r - 0.02) // arc tolerance
+          expect(dist(x, y)).toBeGreaterThan(r - 0.03) // arc and clipping tolerance
           checked++
         }
       }
       prev = q
+    }
+  }
+  expect(checked).toBeGreaterThan(100)
+}
+
+function assertInsideWall(shape: Shape, bit: string) {
+  const p = project([{ ...shape, cut: { ...defaultCut(12), type: 'pocket', depth: 3 } }], bit)
+  assertSegmentsInsideWall(shape, planProject(p).ops[0], bit)
+}
+
+function assertPocketCovered(shape: Shape, op: Op, bit: string) {
+  const moves: [Pt3, Pt3][] = []
+  let prev: Pt3 | null = null
+  for (const seg of op.segments) {
+    for (const q of seg.points) {
+      if (prev && !seg.rapid && prev[2] < 0 && q[2] === prev[2] && (q[0] !== prev[0] || q[1] !== prev[1])) moves.push([prev, q])
+      prev = q
+    }
+  }
+  const region = shapeRegion(shape)
+  const xs = region.flat().map((p) => p.x)
+  const ys = region.flat().map((p) => p.y)
+  const { insideRegion } = regionProbe(shape)
+  const radius = findBit(bit).diameter / 2
+  const distance = (x: number, y: number, [a, b]: [Pt3, Pt3]) => {
+    const [dx, dy] = [b[0] - a[0], b[1] - a[1]]
+    const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy)))
+    return Math.hypot(x - a[0] - t * dx, y - a[1] - t * dy)
+  }
+  let checked = 0
+  for (let y = Math.min(...ys) + 1; y < Math.max(...ys); y += 2) {
+    for (let x = Math.min(...xs) + 1; x < Math.max(...xs); x += 2) {
+      if (!insideRegion(x, y)) continue
+      expect(Math.min(...moves.map((move) => distance(x, y, move)))).toBeLessThan(radius + 0.15)
+      checked++
     }
   }
   expect(checked).toBeGreaterThan(100)
@@ -183,14 +229,42 @@ describe('detail', () => {
     // A square the bit fits in, with a slot too narrow for it.
     const points: Point[] = [[-10, -10], [10, -10], [10, 10], [1.25, 10], [1.25, 30], [-1.25, 30], [-1.25, 10], [-10, 10]]
     const keyhole: CompoundShape = { id: 'k', type: 'compound', name: 'Rect', x: 50, y: 50, rotation: 0, paths: [{ closed: true, points }], cut: { ...defaultCut(12), type: 'pocket', depth: 3 } }
-    expect(planProject(project([keyhole])).warnings).toEqual(["The rough bit can't reach all of Rect; add a smaller detail bit"])
+    expect(planProject(project([keyhole])).warnings).toEqual(["The smallest selected bit can't reach all of Rect"])
     const detailOnly = { ...keyhole, cut: { ...keyhole.cut!, bit: 'detail' as const } }
-    expect(planProject(project([detailOnly], '1/8-endmill', '6mm-endmill')).warnings).toContain("The detail bit can't reach all of Rect")
+    expect(planProject(project([detailOnly], '1/8-endmill', '6mm-endmill')).warnings).toContain("The smallest selected bit can't reach all of Rect")
     expect(planProject(project([pocket])).warnings).toEqual([])
-    expect(planProject(project([pocket], '1mm-endmill', '6mm-endmill')).warnings).toContain('The detail bit must be smaller than the rough bit')
+    expect(planProject(project([pocket], '1mm-endmill', '6mm-endmill')).warnings).not.toContain('Bit too large for Rect')
   })
   it('no detail bit, no detail op', () => {
     expect(planProject(project([pocket])).ops.map((o) => o.kind)).toEqual(['pocket'])
+  })
+  it('Automatic uses every fitting flat bit from largest to smallest', () => {
+    const points: Point[] = [
+      [-20, -20], [20, -20], [20, 20], [2.5, 20], [2.5, 35], [1, 35], [1, 50],
+      [-1, 50], [-1, 35], [-2.5, 35], [-2.5, 20], [-20, 20],
+    ]
+    const shape: CompoundShape = {
+      id: 'steps', type: 'compound', name: 'Steps', x: 60, y: 60, rotation: 0,
+      paths: [{ closed: true, points }],
+      cut: { ...defaultCut(12), type: 'pocket', depth: 2 },
+    }
+    const p = project([shape], '1mm-endmill', '6mm-endmill')
+    const mid = 'tool-mid' as const
+    p.bits[mid] = '1/8-endmill'
+    p.bitOrder.push(mid)
+    p.cutSettings[mid] = recommendedSettings(findMaterial(p.materialId), findBit('1/8-endmill'), p.machine.maxRpm)
+
+    const ops = planProject(p).ops.filter((op) => op.kind.startsWith('pocket'))
+    expect(ops.map((op) => [op.role, op.kind])).toEqual([
+      ['detail', 'pocket'],
+      [mid, 'pocket-detail'],
+      ['rough', 'pocket-detail'],
+    ])
+    for (const [op, bit] of ops.map((op) => [op, p.bits[op.role]!] as const)) assertSegmentsInsideWall(shape, op, bit, 2)
+    const cutYs = (op: Op) => op.segments.filter((segment) => !segment.rapid).flatMap((segment) => segment.points.filter((q) => q[2] < 0).map((q) => q[1]))
+    expect(Math.max(...cutYs(ops[0]))).toBeLessThan(81)
+    expect(Math.max(...cutYs(ops[1]))).toBeGreaterThan(93)
+    expect(Math.max(...cutYs(ops[2]))).toBeGreaterThan(108)
   })
 })
 
@@ -246,6 +320,29 @@ describe('plan and gcode', () => {
     expect(detail).toHaveLength(1)
     expect(detail[0].shapeIds).toEqual(['outer', 'middle', 'inner'])
   })
+  it('pre-cuts outer and island walls with the smallest bit before larger clearing bits', () => {
+    const shape: CompoundShape = {
+      id: 'protected', type: 'compound', name: 'Protected', x: 60, y: 50, rotation: 0,
+      paths: [
+        { closed: true, points: [[-25, -20], [25, -20], [25, 20], [-25, 20]] },
+        { closed: true, points: [[-5, -5], [-5, 5], [5, 5], [5, -5]] },
+      ],
+      cut: { ...defaultCut(12), type: 'pocket', depth: 2, pocketPrecut: true },
+    }
+    const p = project([shape], '6mm-endmill', '1mm-endmill')
+    p.cutSettings.detail!.stepdown = 1
+    const result = planProject(p)
+    const edge = result.ops[0]
+
+    expect([edge.role, edge.kind]).toEqual(['detail', 'pocket-edge'])
+    expect(result.ops.findIndex((op) => op.role === 'rough')).toBeGreaterThan(result.ops.map((op) => op.role).lastIndexOf('detail'))
+    const loops = edge.segments.filter((segment) => !segment.rapid && !segment.plunge && segment.points.length > 2)
+    expect(loops).toHaveLength(4) // outer wall + island wall at each of two depths
+    expect(loops.map((segment) => segment.points[0][2])).toEqual([-1, -1, -2, -2])
+    const widths = loops.map((segment) => Math.max(...segment.points.map((q) => q[0])) - Math.min(...segment.points.map((q) => q[0])))
+    expect(widths.filter((w) => w > 20)).toEqual([expect.closeTo(49, 2), expect.closeTo(49, 2)])
+    expect(widths.filter((w) => w < 20)).toEqual([expect.closeTo(11, 2), expect.closeTo(11, 2)])
+  })
   it('plans the same overlapping-pocket geometry regardless of shape order', () => {
     const pockets = [
       { ...rect(60, 60), id: 'outer', cut: { ...defaultCut(12), type: 'pocket' as const, depth: 1 } },
@@ -279,31 +376,35 @@ describe('plan and gcode', () => {
     const p = project([shape])
     p.cutSettings.rough.stepdown = 1
     const op = planProject(p).ops[0]
-    const r = findBit('1/8-endmill').diameter / 2
-    const { dist, insideRegion } = regionProbe(shape)
+    assertSegmentsInsideWall(shape, op, '1/8-endmill')
+    assertPocketCovered(shape, op, '1/8-endmill')
     const rasterAngles: number[] = []
     let prev: Pt3 | null = null
-    let checked = 0
     for (const seg of op.segments) {
       for (const q of seg.points) {
         if (prev && !seg.rapid && !seg.plunge && q[2] < 0 && (q[0] !== prev[0] || q[1] !== prev[1])) {
           const length = Math.hypot(q[0] - prev[0], q[1] - prev[1])
           if (seg.points.length === 1 && length > 5) rasterAngles.push(((Math.atan2(q[1] - prev[1], q[0] - prev[0]) * 180) / Math.PI + 180) % 180)
-          for (let k = 0; k <= 10; k++) {
-            const x = prev[0] + ((q[0] - prev[0]) * k) / 10
-            const y = prev[1] + ((q[1] - prev[1]) * k) / 10
-            expect(insideRegion(x, y)).toBe(true)
-            expect(dist(x, y)).toBeGreaterThan(r - 0.03)
-            checked++
-          }
         }
         prev = q
       }
     }
-    expect(checked).toBeGreaterThan(100)
     const aligned = rasterAngles.filter((angle) => Math.abs(angle - 30) < 1e-5)
     expect(aligned.length).toBeGreaterThan(5)
     expect(aligned.length / rasterAngles.length).toBeGreaterThan(0.75) // the remainder are safe links between rows
+  })
+  it.each(['crosshatch', 'spiral', 'radial'] as const)('%s clearing stays inside a pocket with a hole', (pocketPattern) => {
+    const shape: CompoundShape = {
+      id: pocketPattern, type: 'compound', name: pocketPattern, x: 40, y: 35, rotation: 0,
+      paths: [
+        { closed: true, points: [[-20, -15], [20, -15], [20, 15], [-20, 15]] },
+        { closed: true, points: [[-6, -4], [-6, 4], [6, 4], [6, -4]] },
+      ],
+      cut: { ...defaultCut(12), type: 'pocket', depth: 1, pocketPattern, pocketAngle: 25 },
+    }
+    const op = planProject(project([shape])).ops[0]
+    assertSegmentsInsideWall(shape, op, '1/8-endmill', 2)
+    assertPocketCovered(shape, op, '1/8-endmill')
   })
   it('combines overlapping raster pockets only when their angle matches', () => {
     const pocket = (id: string, angle: number, w: number) => ({
@@ -335,7 +436,7 @@ describe('plan and gcode', () => {
     expect(result.ops[0].segments.filter((s) => s.plunge).map((s) => s.points[0][2])).toEqual(zLevels(2, p.cutSettings.detail!.stepdown))
     const xs = result.ops[0].segments.filter((s) => !s.rapid).flatMap((s) => s.points.map((q) => q[0]))
     expect(Math.max(...xs) - Math.min(...xs)).toBeCloseTo(29, 2)
-    expect(planProject(project([pocket], '6mm-endmill')).warnings).toEqual(['Rect needs a detail bit'])
+    expect(planProject(project([pocket], '6mm-endmill')).warnings).toEqual(['Rect needs its selected bit'])
   })
   it('uses the overridden bit diameter', () => {
     const width = (p: Project) => {
@@ -354,7 +455,7 @@ describe('plan and gcode', () => {
       const ops = r.ops.filter((o) => o.role === role)
       expect(ops.length).toBeGreaterThan(0)
       expect(ops.every((o) => o.timeSec! > 0)).toBe(true)
-      expect(ops.reduce((a, o) => a + o.timeSec!, 0)).toBeCloseTo(r.timeSec[role], 6)
+      expect(ops.reduce((a, o) => a + o.timeSec!, 0)).toBeCloseTo(r.timeSec[role]!, 6)
     }
   })
   it('warns when the stock is larger than the machine work area', () => {
@@ -489,7 +590,7 @@ describe('ordering and tab limits', () => {
   const pocket = { ...rect(50, 50), id: 'p', x: 200, y: 100, cut: { ...defaultCut(12), type: 'pocket' as const, depth: 3 } }
   const outline = (extra: Partial<Shape['cut'] & object> = {}) => ({ ...rect(20, 20), id: 'o', cut: { ...defaultCut(12), ...extra } })
   it('warns when a tabless part is freed before the detail pass', () => {
-    const warn = 'Parts are cut free before the detail pass; keep tabs on'
+    const warn = 'Parts are cut free before later bit passes; keep tabs on'
     expect(planProject(project([outline({ tabs: false }), pocket], '6mm-endmill', '1mm-endmill')).warnings).toContain(warn)
     expect(planProject(project([outline({ tabs: false, side: 'on' }), pocket], '6mm-endmill', '1mm-endmill')).warnings).toContain(warn)
     expect(planProject(project([outline(), pocket], '6mm-endmill', '1mm-endmill')).warnings).not.toContain(warn)
@@ -504,7 +605,7 @@ describe('ordering and tab limits', () => {
     expect(planProject(project([small], '6mm-endmill')).warnings).toEqual(['Bit too large for Rect']) // not also "can't reach"
     const r = planProject(project([small], '6mm-endmill', '1mm-endmill'))
     expect(r.warnings).not.toContain('Bit too large for Rect')
-    expect(r.ops.map((o) => o.kind)).toEqual(['pocket-detail'])
+    expect(r.ops.map((o) => o.kind)).toEqual(['pocket'])
   })
   it('caps tabs at half of each loop', () => {
     // Loop about 40 + π·3.175 ≈ 50 mm: at most 4 tabs of 6 mm.
@@ -840,5 +941,11 @@ describe('v-carve', () => {
 function project(shapes: Shape[], rough = '1/8-endmill', detail?: string): Project {
   const p = newProject()
   const rec = (id: string) => recommendedSettings(findMaterial(p.materialId), findBit(id), p.machine.maxRpm)
-  return { ...p, shapes, bits: { rough, ...(detail && { detail }) }, cutSettings: { rough: rec(rough), ...(detail && { detail: rec(detail) }) } }
+  return {
+    ...p,
+    shapes,
+    bits: { rough, ...(detail && { detail }) },
+    bitOrder: ['rough', ...(detail ? (['detail'] as const) : [])],
+    cutSettings: { rough: rec(rough), ...(detail && { detail: rec(detail) }) },
+  }
 }

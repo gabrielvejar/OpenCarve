@@ -1,8 +1,8 @@
 import { toGcode } from './cam/gcode'
-import { effectiveBit } from './lib/library'
+import { effectiveBit, machiningBitRoles } from './lib/library'
 import { formatLength } from './lib/units'
-import type { BitRole, Project } from './model'
-import { mmss, ROLE_LABEL, Summary, Warnings } from './SimulatePanel'
+import { type BitRole, type Project } from './model'
+import { mmss, roleLabel, Summary, Warnings } from './SimulatePanel'
 import { useAppStore } from './store'
 
 const fileName = (project: Project, bitName: string) => `${project.name}-${bitName}.nc`.replace(/[\\/:*?"<>|]/g, '_')
@@ -24,7 +24,8 @@ export default function ExportPanel() {
   const project = useAppStore((s) => s.project)
   const cam = useAppStore((s) => s.cam)
   const busy = useAppStore((s) => s.camBusy)
-  const roles = (['rough', 'detail'] as BitRole[]).filter((r) => project.bits[r])
+  const plannedRoles = [...new Set(cam?.ops.map((op) => op.role) ?? [])]
+  const roles = [...plannedRoles, ...machiningBitRoles(project).filter((role) => !plannedRoles.includes(role))]
 
   const download = (role: BitRole, name: string) => {
     const url = URL.createObjectURL(new Blob([toGcode(cam!, role, project)], { type: 'text/plain' }))
@@ -43,7 +44,7 @@ export default function ExportPanel() {
       {!busy && cam && !cam.ops.length && <p className="hint">Nothing to export yet. Give a shape a cut in the Design step.</p>}
       <p className="export-note">
         {setupNote(project)}
-        {roles.length > 1 && " Run the rough bit first, then change to the detail bit. After changing bits, re-zero Z only; don't move X or Y."}
+        {roles.length > 1 && " Run the bit files in the listed order. After each bit change, re-zero Z only; don't move X or Y."}
       </p>
       <ul className="export-bits">
         {roles.map((role) => {
@@ -53,7 +54,7 @@ export default function ExportPanel() {
           return (
             <li key={role} className="export-bit">
               <h3>
-                {ROLE_LABEL[role]}: {bit.name}
+                {roleLabel(project, role)}: {bit.name}
               </h3>
               <p>
                 {ops} {ops === 1 ? 'toolpath' : 'toolpaths'} · about {mmss(cam?.timeSec[role] ?? 0)}
@@ -61,8 +62,8 @@ export default function ExportPanel() {
               <p className="file-name" title={name}>
                 {name}
               </p>
-              <button disabled={busy || !ops} onClick={() => download(role, name)}>
-                Download {role} G-code
+              <button aria-label={`Download ${roleLabel(project, role)} G-code`} disabled={busy || !ops} onClick={() => download(role, name)}>
+                Download G-code
               </button>
               {!busy && cam && !ops && <p className="hint">No toolpaths for this bit</p>}
             </li>

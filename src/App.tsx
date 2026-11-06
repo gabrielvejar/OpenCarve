@@ -36,6 +36,7 @@ const SHORTCUTS: [string, string][] = [
   [`${mod}+D`, 'Duplicate'],
   ['G', 'Snap to grid on/off (hold Alt to bypass)'],
   ['Arrows', 'Nudge 1 mm (⇧ 10 mm)'],
+  ['Click / drag', 'Pen corner / Bézier node'],
   ['Enter / double-click', 'Finish pen path'],
   ['Esc', 'Deselect / cancel'],
   ['Wheel', 'Pan'],

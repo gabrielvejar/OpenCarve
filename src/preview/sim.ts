@@ -51,7 +51,7 @@ export function createSim({ stock, bits, resolution }: Omit<SimInput, 'id' | 'op
   const width = Math.ceil(stock.w / cell - 1e-9) + 1
   const height = Math.ceil(stock.h / cell - 1e-9) + 1
   const heights = new Float32Array(width * height)
-  const tools = { rough: bits.rough && profile(bits.rough), detail: bits.detail && profile(bits.detail) }
+  const tools = Object.fromEntries(Object.entries(bits).map(([role, bit]) => [role, bit && profile(bit)])) as Partial<Record<BitRole, ReturnType<typeof profile>>>
   // Rows changed since the last takeDirty(), and since creation.
   let lo = Infinity
   let hi = -Infinity

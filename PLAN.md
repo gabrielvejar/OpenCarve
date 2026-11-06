@@ -15,7 +15,7 @@ ease of use (Settings → Design → Simulate → Export) without the carve limi
 
 ## Steps
 1. **Scaffold** — bun + Vite + React + TS, Vitest, Playwright, ESLint, LICENSE (AGPL-3.0), README, app shell with three-panel layout and top Design/Simulate/Export step bar.
-2. **Document model + 2D canvas** — Zustand store: project {name, units, material {w,h,thickness}, shapes[]}. Shapes: rect, ellipse, polygon, line/pen path, all stored as closed/open polylines in mm. SVG canvas with grid, pan/zoom, select, move/scale/rotate handles, delete, duplicate, align, nudge, undo/redo, property inspector (x, y, w, h, rotation).
+2. **Document model + 2D canvas** — Zustand store: project {name, units, material {w,h,thickness}, shapes[]}. Shapes: rect, ellipse, polygon, and straight/Bézier pen paths (curves flatten to precise polylines for CAM), all stored as closed/open polylines in mm. SVG canvas with grid, pan/zoom, select, move/scale/rotate handles, delete, duplicate, align, nudge, undo/redo, property inspector (x, y, w, h, rotation).
 3. **Text + SVG import** — opentype.js with 4–6 bundled OFL fonts, text shape editable in inspector; SVG file import (paths, basic shapes, transforms, groups) flattened to polylines.
 4. **Materials, bits, cut settings** — bundled JSON library (materials × bits → feed, plunge, stepdown, RPM), machine panel (work area), bit picker, per-shape cut settings: type (outline outside/inside/on, fill/pocket, V-carve), depth (or through), tabs (count/size/height), roughing + detail bit.
 5. **Toolpath engine (worker)** — profile offsets, pocketing by successive offsets, depth passes with stepdown, tabs, two-stage roughing/detail, ramp-free plunges; G-code emitter (safe Z, feeds, spindle, footer); time estimate. Vitest coverage.
@@ -50,7 +50,7 @@ v1.2 step 15 is done.
 v1.2 step 16 is done.
 16. Settings step: Settings → Design → Simulate → Export; new projects open on Settings, reopened or opened files on Design. The project settings (Stock + Work zero, Machine, Bits, Material, cut settings, G-code) moved to a two-column Settings panel that takes over the 3D preview's area (the preview stays mounted, hidden); Design with nothing selected shows a summary with "Edit in Settings". Custom G-code blocks before/after the toolpaths (printable ASCII, ≤ 20 000 characters each), appended to the standard lines or replacing them, with a live preview of the rough file's first and last lines. `project.gcode` is required in project files. Format version 2 is the first public format.
 
-Since v1.2: snap to grid with a zoom-adaptive grid, font-picker previews, tabs kept off corners, depth-aware merging of overlapping pocket toolpaths so shared material is cleared only once, per-shape Automatic/Rough only/Detail only bit assignment, and concentric or angled parallel-line pocket patterns. Project format v4 adds the pocket pattern and angle; earlier cuts migrate to Concentric.
+Since v1.2: snap to grid with a zoom-adaptive grid, font-picker previews, tabs kept off corners, depth-aware merging of overlapping pocket toolpaths so shared material is cleared only once, per-shape bit assignment, concentric, angled lines, crosshatch, spiral or radial pocket patterns, optional pocket-edge pre-cutting with the smallest bit before larger clearing bits, editable Bézier pen paths, and positive-relief pockets with protected islands. Project format v8 stores Bézier nodes and migrates v2–v7 projects automatically.
 
 ### Known limitations
 - Text has no ligatures or complex-script shaping.

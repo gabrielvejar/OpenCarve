@@ -185,7 +185,7 @@ test('each bit follows its recommendation until customised', () => {
   store().setCutSettings('detail', { feed: 100 })
   store().setBits({ rough: '1/4-endmill' })
   expect(cs().detail).toBeUndefined()
-  expect(store().project.cutSettingsCustom.detail).toBe(false)
+  expect(store().project.cutSettingsCustom.detail).toBeUndefined()
 })
 
 test('custom settings are dropped when that role gets a different bit', () => {

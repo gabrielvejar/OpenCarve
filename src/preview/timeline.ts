@@ -19,7 +19,7 @@ export interface Timeline {
 
 export type Settings = Partial<Record<BitRole, CutSettings>>
 
-// Every move in G-code order (the rough file, then the detail file), timed like gcode.ts: each file starts at
+// Every move in the planner's tool-change order, timed like gcode.ts: each file starts at
 // (0, 0, safe Z) with the spin-up dwell, which counts as a zero-length move.
 export function buildTimeline(ops: Op[], settings: Settings): Timeline {
   const moves: Move[] = []
@@ -28,7 +28,8 @@ export function buildTimeline(ops: Op[], settings: Settings): Timeline {
     moves.push({ a, b, t0: t, t1: t + sec, op, role, cut })
     t += sec
   }
-  for (const role of ['rough', 'detail'] as const) {
+  const roles = [...new Set(ops.map((op) => op.role))]
+  for (const role of roles) {
     const s = settings[role]
     const mine = ops.flatMap((o, i) => (o.role === role ? [i] : []))
     if (!s || !mine.length) continue

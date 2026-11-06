@@ -18,7 +18,7 @@ function sample(): Project {
     rect('outline', 30, 30, { cut: defaultCut(12) }),
     rect('pocket', 120, 60, { cut: { ...defaultCut(12), type: 'pocket', depth: 3 } }),
   ]
-  return { ...p, shapes, bits: { rough: '6mm-endmill', detail: '1mm-endmill' }, cutSettings: { rough: rec('6mm-endmill'), detail: rec('1mm-endmill') } }
+  return { ...p, shapes, bits: { rough: '6mm-endmill', detail: '1mm-endmill' }, bitOrder: ['rough', 'detail'], cutSettings: { rough: rec('6mm-endmill'), detail: rec('1mm-endmill') } }
 }
 
 describe('timeline', () => {
@@ -34,7 +34,7 @@ describe('timeline', () => {
       expect(m.t1).toBeGreaterThanOrEqual(m.t0)
       if (i) expect(m.t0).toBe(tl.moves[i - 1].t1)
     })
-    expect(Math.abs(tl.total - (cam.timeSec.rough + cam.timeSec.detail))).toBeLessThan(1e-6)
+    expect(Math.abs(tl.total - (cam.timeSec.rough! + cam.timeSec.detail!))).toBeLessThan(1e-6)
   })
 
   it('puts the tool at the first point at 0 and the last point at the end', () => {

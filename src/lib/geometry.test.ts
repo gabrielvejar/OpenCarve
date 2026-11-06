@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
 import type { Shape } from '../model'
-import { gridPath, gridSteps, scaleShape, shapeBounds, shapeToPolylines } from './geometry'
+import { gridPath, gridSteps, positiveReliefShape, scaleShape, shapeBounds, shapeToPolylines } from './geometry'
 
 const base = { id: 'a', name: 'a', x: 50, y: 20, rotation: 0 }
 
@@ -39,6 +39,16 @@ test('path bounds and scaling', () => {
   const shape: Shape = { ...base, type: 'path', points: [[-5, 0], [5, 10], [0, -10]], closed: true }
   close(shapeBounds(shape), { minX: 45, minY: 10, maxX: 55, maxY: 30 })
   close(shapeBounds(scaleShape(shape, 2, 0.5)), { minX: 40, minY: 15, maxX: 60, maxY: 25 })
+})
+
+test('positive relief makes contained shapes protected pocket islands', () => {
+  const outer: Shape = { ...base, type: 'rect', name: 'Outer', x: 50, y: 50, w: 40, h: 40, rotation: 0 }
+  const inner: Shape = { ...base, type: 'ellipse', name: 'Island', x: 50, y: 50, w: 12, h: 12, rotation: 0 }
+  const relief = positiveReliefShape([outer, inner], 'relief', 12)
+  expect(relief).toMatchObject({ type: 'compound', fillRule: 'evenodd', cut: { type: 'pocket', depth: 12 } })
+  expect(relief?.paths).toHaveLength(2)
+  const outside: Shape = { ...inner, x: 100 }
+  expect(positiveReliefShape([outer, outside], 'bad', 12)).toBeNull()
 })
 
 test('grid lines stay inside the stock and near the visible area', () => {

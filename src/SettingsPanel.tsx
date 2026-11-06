@@ -3,7 +3,7 @@ import { gcodeHead, gcodeMoves, gcodeTail } from './cam/gcode'
 import { Field, Section, Segmented } from './Inspector'
 import { BITS, effectiveBit, findBit, findMaterial, MACHINES, MATERIALS, overrideError } from './lib/library'
 import { formatLength, mmToIn, parseLength, type Units } from './lib/units'
-import { gcodeBlockError, gcodeHeaderWarnings, MAX_GCODE_BLOCK, MAX_STEPOVER, type BitOverride, type BitRole, type OriginPreset } from './model'
+import { bitRoleLabel, configuredBitRoles, gcodeBlockError, gcodeHeaderWarnings, MAX_GCODE_BLOCK, MAX_STEPOVER, type BitOverride, type BitRole, type OriginPreset, type ProjectBits } from './model'
 import { useAppStore } from './store'
 
 const BIT_TYPES = { endmill: 'Endmill', ballnose: 'Ballnose', vbit: 'V-bit' }
@@ -92,7 +92,7 @@ function BitOverrideFields({ role }: { role: BitRole }) {
     />
   )
   const len = (t: string) => parseLength(t, units)
-  const name = role === 'rough' ? 'Rough' : 'Detail'
+  const name = bitRoleLabel(project, role)
   const libValues = [`${fmt(lib.diameter)} ${units}`, ...(lib.type === 'vbit' ? [`${lib.angle}°`, `flat ${fmt(lib.flat ?? 0)} ${units}`] : [])].join(', ')
   return (
     <div className="fields bit-fields" role="group" aria-label={`${name} dimensions`}>
@@ -202,6 +202,7 @@ export default function SettingsPanel() {
   const project = useAppStore((s) => s.project)
   const { units, stock, machine, bits, cutSettings, cutSettingsCustom } = project
   const st = useAppStore.getState
+  const roles = configuredBitRoles(project)
   const length = (label: string, mm: number, set: (v: number) => void) => (
     <Field
       label={label}
@@ -237,7 +238,7 @@ export default function SettingsPanel() {
     if (!c) return null
     const set = (patch: Parameters<ReturnType<typeof st>['setCutSettings']>[1]) => st().setCutSettings(role, patch)
     return (
-      <Section key={role} title={role === 'rough' ? 'Rough cut settings' : 'Detail cut settings'}>
+      <Section key={role} title={`${bitRoleLabel(project, role)} cut settings`}>
         <div className="fields">
           {rate('Feed', c.feed, (feed) => set({ feed }))}
           {rate('Plunge', c.plunge, (plunge) => set({ plunge }))}
@@ -318,11 +319,38 @@ export default function SettingsPanel() {
       </Section>
       <Section title="Bits">
         <div className="fields">
-          {bitSelect('Rough bit', bits.rough, (rough) => st().setBits({ ...bits, rough }))}
-          <BitOverrideFields role="rough" />
-          {bitSelect('Detail bit', bits.detail, (detail) => st().setBits({ rough: bits.rough, ...(detail && { detail }) }), true)}
-          <BitOverrideFields role="detail" />
+          {roles.map((role) => (
+            <div key={role} className="wide">
+              {bitSelect(`${bitRoleLabel(project, role)} bit`, bits[role], (id) => st().setBits({ ...bits, [role]: id }))}
+              <BitOverrideFields role={role} />
+              {role !== 'rough' && (
+                <p className="note">
+                  <button
+                    onClick={() => {
+                      const next = { ...bits }
+                      delete next[role]
+                      st().setBits(next as ProjectBits)
+                    }}
+                  >
+                    Remove {bitRoleLabel(project, role).toLowerCase()} bit
+                  </button>
+                </p>
+              )}
+            </div>
+          ))}
         </div>
+        <p className="note">
+          <button
+            onClick={() => {
+              const role: BitRole = bits.detail ? `tool-${crypto.randomUUID()}` : 'detail'
+              const id = BITS.find((bit) => bit.id === '1mm-endmill')?.id ?? BITS[0].id
+              st().setBits({ ...bits, [role]: id })
+            }}
+          >
+            Add bit
+          </button>
+        </p>
+        <p className="hint">Automatic pocketing normally runs compatible bits from largest to smallest. Edge pre-cutting moves the smallest-bit file first.</p>
       </Section>
       <Section title="Material">
         <label className="field">
@@ -336,8 +364,7 @@ export default function SettingsPanel() {
           </select>
         </label>
       </Section>
-      {bitSettings('rough')}
-      {bitSettings('detail')}
+      {roles.map(bitSettings)}
       <GcodeSection />
     </div>
   )

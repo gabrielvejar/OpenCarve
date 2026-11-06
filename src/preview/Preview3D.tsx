@@ -3,6 +3,7 @@ import type * as THREE from 'three'
 import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import type { Op, Pt3 } from '../cam/toolpath'
 import { effectiveBit } from '../lib/library'
+import { configuredBitRoles } from '../model'
 import type { Bit } from '../model'
 import { useAppStore } from '../store'
 import PlaybackBar from './PlaybackBar'
@@ -84,7 +85,7 @@ function toolpathGeometry(T: typeof THREE, tl: Timeline, ops: Op[]) {
     starts[i + 1] = starts[i] + (cut ? 1 : 0)
     if (!cut) return
     pos.push(a[0], a[2] + LINE_LIFT, -a[1], b[0], b[2] + LINE_LIFT, -b[1])
-    const { r, g, b: bl } = colors[ops[op].kind === 'vcarve' ? 'vcarve' : role]
+    const { r, g, b: bl } = colors[ops[op].kind === 'vcarve' ? 'vcarve' : role === 'rough' ? 'rough' : 'detail']
     col.push(r, g, bl, r, g, bl)
   })
   const g = new T.BufferGeometry()
@@ -383,7 +384,7 @@ export default function Preview3D() {
     let tool = null
     if (step === 'simulate' && tl?.moves.length) {
       tool = new view.T.Group()
-      for (const role of ['rough', 'detail'] as const) {
+      for (const role of configuredBitRoles(useAppStore.getState().project)) {
         if (bits[role]) tool.add(Object.assign(toolModel(view.T, effectiveBit({ bits, bitOverrides }, role), view.materials), { name: role }))
       }
     }

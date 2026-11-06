@@ -140,6 +140,62 @@ test('draws a path with the pen tool', async ({ page }) => {
   await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Path')
 })
 
+test('draws a curved path by dragging pen nodes', async ({ page }) => {
+  await page.getByRole('button', { name: 'Pen' }).click()
+  await expect(page.getByText('Click for corners · drag for curves · Enter to finish')).toBeVisible()
+  const box = (await page.getByLabel('Design canvas').boundingBox())!
+  const [x, y] = [box.x + box.width / 2, box.y + box.height / 2]
+  await page.mouse.move(x - 60, y)
+  await page.mouse.down()
+  await page.mouse.move(x - 60, y - 45, { steps: 4 })
+  await page.mouse.up()
+  await page.mouse.move(x + 60, y)
+  await page.mouse.down()
+  await page.mouse.move(x + 60, y + 45, { steps: 4 })
+  await page.mouse.up()
+  await expect(page.locator('.pen-control')).toHaveCount(4)
+  await page.keyboard.press('Enter')
+  const d = await page.locator('[data-id] path:not(.hit)').getAttribute('d')
+  expect((d?.match(/L/g) ?? []).length).toBeGreaterThan(10)
+})
+
+test('edits a completed path through its anchors and handles', async ({ page }) => {
+  await page.getByRole('button', { name: 'Pen' }).click()
+  const box = (await page.getByLabel('Design canvas').boundingBox())!
+  const [x, y] = [box.x + box.width / 2, box.y + box.height / 2]
+  await page.mouse.move(x - 50, y)
+  await page.mouse.down()
+  await page.mouse.move(x - 50, y - 35, { steps: 4 })
+  await page.mouse.up()
+  await page.mouse.click(x + 50, y)
+  await page.keyboard.press('Enter')
+  await expect(page.locator('.path-anchor')).toHaveCount(2)
+  await expect(page.locator('.path-control')).toHaveCount(2)
+  const line = page.locator('[data-id] path:not(.hit)')
+  const before = await line.getAttribute('d')
+  const anchor = page.locator('.path-anchor').first()
+  const position = await anchor.boundingBox()
+  if (!position) throw new Error('missing path anchor')
+  await page.mouse.move(position.x + position.width / 2, position.y + position.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(position.x + position.width / 2, position.y - 35, { steps: 4 })
+  await page.mouse.up()
+  await expect(line).not.toHaveAttribute('d', before!)
+  const afterAnchor = await line.getAttribute('d')
+  const control = page.locator('.path-control').first()
+  const controlPosition = await control.boundingBox()
+  if (!controlPosition) throw new Error('missing path control')
+  await page.mouse.move(controlPosition.x + controlPosition.width / 2, controlPosition.y + controlPosition.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(controlPosition.x + 24, controlPosition.y + controlPosition.height / 2, { steps: 4 })
+  await page.mouse.up()
+  await expect(line).not.toHaveAttribute('d', afterAnchor!)
+  await page.keyboard.press('ControlOrMeta+z')
+  await expect(line).toHaveAttribute('d', afterAnchor!)
+  await page.keyboard.press('ControlOrMeta+z')
+  await expect(line).toHaveAttribute('d', before!)
+})
+
 test('places a text shape with the text tool', async ({ page }) => {
   await page.getByRole('button', { name: 'Text' }).click()
   const box = (await page.getByLabel('Design canvas').boundingBox())!
@@ -200,15 +256,42 @@ test('sets a rectangle to a pocket cut', async ({ page }) => {
   await expect(depth).toHaveValue('3.00')
   await expect(page.getByRole('slider', { name: 'Depth' })).toHaveValue('3')
   await expect(page.getByLabel('Tabs')).toHaveCount(0)
-  await expect(page.getByRole('radio', { name: 'Automatic' })).toBeChecked()
-  await expect(page.getByRole('radio', { name: 'Detail only' })).toBeDisabled()
-  await expect(page.getByRole('radio', { name: 'Concentric' })).toBeChecked()
-  await page.getByRole('radio', { name: 'Parallel lines' }).click()
+  await expect(page.getByLabel('Bit usage')).toHaveValue('auto')
+  await expect(page.getByLabel('Bit usage').locator('option')).toHaveCount(2)
+  await expect(page.getByLabel('Pre-cut pocket edges')).toBeDisabled()
+  const pattern = page.getByLabel('Pocket pattern')
+  await expect(pattern).toHaveValue('concentric')
+  await expect(pattern.locator('option')).toHaveCount(5)
+  await pattern.selectOption('raster')
   const angle = page.getByLabel('Pattern angle °')
   await expect(angle).toHaveValue('0')
   await angle.fill('225')
   await angle.press('Enter')
   await expect(angle).toHaveValue('45')
+})
+
+test('creates a positive relief pocket with a protected inner island', async ({ page }) => {
+  const box = (await page.getByLabel('Design canvas').boundingBox())!
+  const draw = async (x: number, y: number, w: number, h: number) => {
+    await page.getByRole('button', { name: 'Rectangle' }).click()
+    await page.mouse.move(x - w / 2, y - h / 2)
+    await page.mouse.down()
+    await page.mouse.move(x + w / 2, y + h / 2)
+    await page.mouse.up()
+  }
+  const [x, y] = [box.x + box.width / 2, box.y + box.height / 2]
+  await draw(x, y, 140, 100)
+  await draw(x, y, 50, 40)
+  await page.keyboard.down('Shift')
+  await page.mouse.click(x - 70, y - 50)
+  await page.keyboard.up('Shift')
+  await expect(page.getByRole('button', { name: 'Make positive relief' })).toBeEnabled()
+  await page.getByRole('button', { name: 'Make positive relief' }).click()
+  await expect(page.locator('[data-id]')).toHaveCount(1)
+  await expect(page.locator('[data-id]')).toHaveAttribute('data-cut', 'pocket')
+  await page.getByRole('button', { name: /^Simulate/ }).click()
+  await waitForCam(page)
+  await expect(page.locator('.toolpath-rough')).toHaveAttribute('d', /M/)
 })
 
 test('assigns a shape exclusively to the detail bit', async ({ page }) => {
@@ -219,16 +302,49 @@ test('assigns a shape exclusively to the detail bit', async ({ page }) => {
   await page.mouse.move(box.x + box.width / 2 + 50, box.y + box.height / 2 + 30, { steps: 4 })
   await page.mouse.up()
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('button', { name: 'Add bit' }).click()
   await page.getByLabel('Detail bit').selectOption('1mm-endmill')
   await page.getByRole('button', { name: 'Design', exact: true }).click()
-  await page.getByRole('radio', { name: 'Detail only' }).click()
+  await page.getByLabel('Bit usage').selectOption('detail')
 
   await page.getByRole('button', { name: /^Simulate/ }).click()
   await waitForCam(page)
   await expect(page.locator('.op-list').getByRole('button')).toContainText('Detail bit')
   await page.getByRole('button', { name: 'Export', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Download rough G-code' })).toBeDisabled()
-  await expect(page.getByRole('button', { name: 'Download detail G-code' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Download Rough G-code' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Download Detail G-code' })).toBeEnabled()
+})
+
+test('an edge pre-cut runs the smallest of three configured bits first', async ({ page }) => {
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByLabel('Rough bit').selectOption('6mm-endmill')
+  await page.getByRole('button', { name: 'Add bit' }).click()
+  await page.getByLabel('Detail bit').selectOption('1/8-endmill')
+  await page.getByRole('button', { name: 'Add bit' }).click()
+  await expect(page.getByLabel('Bit 3 bit')).toHaveValue('1mm-endmill')
+
+  await page.getByRole('button', { name: 'Design', exact: true }).click()
+  await page.getByRole('button', { name: 'Rectangle' }).click()
+  const box = (await page.getByLabel('Design canvas').boundingBox())!
+  await page.mouse.move(box.x + box.width / 2 - 50, box.y + box.height / 2 - 30)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width / 2 + 50, box.y + box.height / 2 + 30, { steps: 4 })
+  await page.mouse.up()
+  await page.getByRole('radio', { name: 'Pocket' }).click()
+  await expect(page.getByLabel('Bit usage')).toHaveValue('auto')
+  await expect(page.getByLabel('Bit usage').locator('option')).toHaveCount(4)
+  await page.getByLabel('Pre-cut pocket edges').check()
+
+  await page.getByRole('button', { name: /^Simulate/ }).click()
+  await waitForCam(page)
+  const ops = page.locator('.op-list').getByRole('button')
+  await expect(ops).toHaveCount(4)
+  await expect(ops.nth(0)).toContainText('Pocket edge pre-cut · Bit 3 bit')
+  await expect(ops.nth(1)).toContainText('Bit 3 bit')
+  await expect(ops.nth(2)).toContainText('Rough bit')
+  await expect(ops.nth(3)).toContainText('Detail bit')
+  await page.getByRole('button', { name: 'Export', exact: true }).click()
+  await expect(page.locator('.export-bit').first()).toContainText('Bit 3')
 })
 
 test('exports G-code for a rectangle', async ({ page }) => {
@@ -240,7 +356,7 @@ test('exports G-code for a rectangle', async ({ page }) => {
   await page.mouse.up()
 
   await page.getByRole('button', { name: 'Export', exact: true }).click()
-  const button = page.getByRole('button', { name: 'Download rough G-code' })
+  const button = page.getByRole('button', { name: 'Download Rough G-code' })
   await expect(button).toBeEnabled()
   const [download] = await Promise.all([page.waitForEvent('download'), button.click()])
   expect(download.suggestedFilename()).toMatch(/^Untitled-.*\.nc$/)
@@ -250,6 +366,7 @@ test('exports G-code for a rectangle', async ({ page }) => {
 
 test('exports a V-carve with a V-bit as the detail bit', async ({ page }) => {
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('button', { name: 'Add bit' }).click()
   await page.getByLabel('Detail bit').selectOption('90-vbit')
   await page.getByRole('button', { name: 'Design', exact: true }).click()
   await page.getByRole('button', { name: 'Rectangle' }).click()
@@ -263,7 +380,7 @@ test('exports a V-carve with a V-bit as the detail bit', async ({ page }) => {
   await expect(page.locator('[data-id]')).toHaveAttribute('data-cut', 'vcarve')
   await expect(page.getByRole('slider', { name: 'Max depth' })).toBeVisible()
   await page.getByRole('button', { name: 'Export', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Download detail G-code' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Download Detail G-code' })).toBeEnabled()
 })
 
 test('simulate lists ops and selects the shape', async ({ page }) => {
@@ -292,7 +409,7 @@ test('simulate lists ops and selects the shape', async ({ page }) => {
   await page.getByRole('button', { name: 'Design', exact: true }).click()
   await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Rectangle')
   await page.getByRole('button', { name: 'Export', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Download rough G-code' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Download Rough G-code' })).toBeEnabled()
 })
 
 test('badges the Simulate step when a shape is partly outside the stock', async ({ page }) => {
@@ -352,7 +469,7 @@ test('adds a custom G-code header and replaces the standard lines', async ({ pag
   await expect(header).toHaveValue('M8') // the rejected edit isn't kept
   const rough = async () => {
     await page.getByRole('button', { name: 'Export', exact: true }).click()
-    const button = page.getByRole('button', { name: 'Download rough G-code' })
+    const button = page.getByRole('button', { name: 'Download Rough G-code' })
     await expect(button).toBeEnabled()
     const [download] = await Promise.all([page.waitForEvent('download'), button.click()])
     return Buffer.concat(await (await download.createReadStream()).toArray()).toString().split('\n')

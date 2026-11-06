@@ -1,5 +1,6 @@
-import type { Point, Polyline, Shape, ShapeBase, TextShape } from '../model'
+import { defaultCut, isOpen, type CompoundShape, type Point, type Polyline, type Shape, type ShapeBase, type TextShape } from '../model'
 import { textGlyphs } from './fonts'
+import { penPoints } from './pen'
 import type { Units } from './units'
 
 export type Bounds = { minX: number; minY: number; maxX: number; maxY: number }
@@ -35,6 +36,49 @@ export function polylineBounds(polys: Polyline[]): Bounds {
   return b
 }
 
+const polygonArea = (points: Point[]) => points.reduce((area, point, i) => area + point[0] * points[(i + 1) % points.length][1] - point[1] * points[(i + 1) % points.length][0], 0) / 2
+
+function containsEvenOdd(polys: Polyline[], [x, y]: Point) {
+  let inside = false
+  for (const { points } of polys) {
+    for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+      const [xi, yi] = points[i]
+      const [xj, yj] = points[j]
+      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside
+    }
+  }
+  return inside
+}
+
+// Turns an outer closed shape plus contained closed shapes into a pocket with protected islands. Even-odd filling
+// means the operation is independent of contour winding, which is important for imported SVGs.
+export function positiveReliefShape(shapes: Shape[], id: string, thickness: number): CompoundShape | null {
+  if (shapes.length < 2 || shapes.some(isOpen)) return null
+  const polylines = shapes.map(shapeToPolylines)
+  if (polylines.some((paths) => !paths.length || paths.some((path) => !path.closed || path.points.length < 3))) return null
+  const outerIndex = polylines.reduce((best, paths, i) => {
+    const area = Math.max(...paths.map((path) => Math.abs(polygonArea(path.points))))
+    const bestArea = Math.max(...polylines[best].map((path) => Math.abs(polygonArea(path.points))))
+    return area > bestArea ? i : best
+  }, 0)
+  const outer = polylines[outerIndex]
+  if (polylines.some((paths, i) => i !== outerIndex && paths.some((path) => path.points.some((point) => !containsEvenOdd(outer, point))))) return null
+  const bounds = polylineBounds(outer)
+  const [x, y] = [(bounds.minX + bounds.maxX) / 2, (bounds.minY + bounds.maxY) / 2]
+  const cut = { ...(shapes[outerIndex].cut ?? defaultCut(thickness)), type: 'pocket' as const, tabs: false }
+  return {
+    id,
+    type: 'compound',
+    name: 'Positive relief',
+    x,
+    y,
+    rotation: 0,
+    fillRule: 'evenodd',
+    paths: polylines.flatMap((paths) => paths.map((path) => ({ closed: true, points: path.points.map(([px, py]): Point => [px - x, py - y]) }))),
+    cut,
+  }
+}
+
 export function localPolylines(shape: Shape): Polyline[] {
   switch (shape.type) {
     case 'rect': {
@@ -67,7 +111,7 @@ export function localPolylines(shape: Shape): Polyline[] {
       return [{ closed: true, points: unit.map(([x, y]) => [(x - cx) * sx, (y - cy) * sy]) }]
     }
     case 'path':
-      return [{ closed: shape.closed, points: shape.points }]
+      return [{ closed: shape.closed, points: shape.nodes ? penPoints(shape.nodes, shape.closed) : shape.points }]
     case 'compound':
       return shape.paths
     case 'text': {
@@ -110,7 +154,11 @@ export function scaleShape(shape: Shape, sx: number, sy: number): Shape {
   const scale = (points: Point[]) => points.map(([x, y]): Point => [x * sx, y * sy])
   switch (shape.type) {
     case 'path':
-      return { ...shape, points: scale(shape.points) }
+      return {
+        ...shape,
+        points: scale(shape.points),
+        ...(shape.nodes && { nodes: shape.nodes.map((node) => ({ point: scale([node.point])[0], ...(node.in && { in: scale([node.in])[0] }), ...(node.out && { out: scale([node.out])[0] }) })) }),
+      }
     case 'compound':
       return { ...shape, paths: shape.paths.map((p) => ({ ...p, points: scale(p.points) })) }
     case 'text': {

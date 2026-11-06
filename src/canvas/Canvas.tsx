@@ -3,13 +3,16 @@ import { opKey, opShapeIds, type Op, type Pt3 } from '../cam/toolpath'
 import { icons } from '../icons'
 import { FONTS, loadFont } from '../lib/fonts'
 import { dominantScale, fitText, gridPath, gridSteps, localBounds, polylineBounds, scaleShape, shapeBounds, shapeToPolylines, toLocal, toWorld, type Bounds } from '../lib/geometry'
+import { draggedPenNode, pathNodes, penPoints, type PenNode } from '../lib/pen'
 import { formatLength, nearestSnap, SNAP_SIZES, snapDelta, snapPoint } from '../lib/units'
-import { DEFAULT_TEXT_LAYOUT, newId, tabsActive, type Point, type Polyline, type Shape } from '../model'
+import { DEFAULT_TEXT_LAYOUT, newId, tabsActive, type PathShape, type Point, type Polyline, type Shape } from '../model'
 import { TOOL_KEYS, useAppStore, type Align, type Tool } from '../store'
 
 type Frame = { x: number; y: number; rotation: number; b: Bounds }
 type Drag =
   | { kind: 'pan'; cx: number; cy: number; panX: number; panY: number }
+  | { kind: 'pen'; node: PenNode }
+  | { kind: 'path'; id: string; index: number; control: 'point' | 'in' | 'out' }
   | { kind: 'transform'; ids: string[]; apply: (p: Point, shift: boolean, grid: number) => Shape[] } // grid: snap size in mm, 0 = off
   | { kind: 'marquee' | 'create'; start: Point; current: Point; shift: boolean; keep: string[] }
 
@@ -37,7 +40,7 @@ function toolpathD(ops: Op[]) {
   let last: Pt3 | null = null
   for (const op of ops) {
     for (const seg of op.segments) {
-      const key = seg.rapid ? 'rapid' : op.kind === 'vcarve' ? 'vcarve' : op.role
+      const key = seg.rapid ? 'rapid' : op.kind === 'vcarve' ? 'vcarve' : op.role === 'rough' ? 'rough' : 'detail'
       const [first, ...rest] = last ? [last, ...seg.points] : seg.points
       d[key] += `M${first[0]} ${first[1]}` + rest.map((p) => `L${p[0]} ${p[1]}`).join('')
       last = seg.points.at(-1)!
@@ -166,11 +169,12 @@ export default function Canvas() {
   const hlPaths = hl && toolpathD([hl])
   const svgRef = useRef<SVGSVGElement>(null)
   const [drag, setDrag] = useState<Drag | null>(null)
+  const pathDragRef = useRef<Extract<Drag, { kind: 'path' }> | null>(null)
   const [hover, setHover] = useState<string | null>(null)
   const [cursor, setCursor] = useState<Point | null>(null)
   const [space, setSpace] = useState(false)
   const [svgSize, setSvgSize] = useState<Point>([0, 0])
-  const [pen, setPen] = useState<Point[]>([])
+  const [pen, setPen] = useState<PenNode[]>([])
   if (tool !== 'pen' && pen.length) setPen([])
 
   const { zoom, panX, panY } = view
@@ -188,19 +192,22 @@ export default function Canvas() {
     return [(e.clientX - r.left - panX) / zoom, (panY - (e.clientY - r.top)) / zoom]
   }
 
-  const finishPen = (points: Point[], closed = false) => {
-    points = points.filter((p, i) => i === 0 || dist(p, points[i - 1]) > 2 / zoom)
-    if (!closed && points.length > 3 && dist(points.at(-1)!, points[0]) < CLOSE_PX / zoom) {
+  const finishPen = (nodes: PenNode[], closed = false) => {
+    nodes = nodes.filter((node, i) => i === 0 || dist(node.point, nodes[i - 1].point) > 2 / zoom)
+    if (!closed && nodes.length > 3 && dist(nodes.at(-1)!.point, nodes[0].point) < CLOSE_PX / zoom) {
       closed = true
-      points = points.slice(0, -1)
+      nodes = nodes.slice(0, -1)
     }
     setPen([])
+    setDrag(null)
+    const points = penPoints(nodes, closed)
     if (points.length < (closed ? 3 : 2)) return
     const b = polylineBounds([{ points, closed }])
     const x = (b.minX + b.maxX) / 2
     const y = (b.minY + b.maxY) / 2
     const st = useAppStore.getState()
-    st.addShape({ id: newId(), type: 'path', name: 'Path', x, y, rotation: 0, closed, points: points.map(([px, py]) => [px - x, py - y]) })
+    const localNodes = nodes.map((node) => ({ point: [node.point[0] - x, node.point[1] - y] as Point, ...(node.in && { in: [node.in[0] - x, node.in[1] - y] as Point }), ...(node.out && { out: [node.out[0] - x, node.out[1] - y] as Point }) }))
+    st.addShape({ id: newId(), type: 'path', name: 'Path', x, y, rotation: 0, closed, points: penPoints(localNodes, closed), nodes: localNodes })
     st.setTool('select')
   }
 
@@ -235,9 +242,11 @@ export default function Canvas() {
   const onKeyDown = useEffectEvent((e: KeyboardEvent) => {
     if (isTyping(e.target)) return
     const st = useAppStore.getState()
-    if (drag) {
+    const activeDrag = drag ?? pathDragRef.current
+    if (activeDrag) {
       if (e.key !== 'Escape') return
-      if (drag.kind === 'transform') st.cancelTransient()
+      if (activeDrag.kind === 'transform' || activeDrag.kind === 'path') st.cancelTransient()
+      pathDragRef.current = null
       setDrag(null)
       e.preventDefault()
       return
@@ -301,8 +310,11 @@ export default function Canvas() {
       return
     }
     if (design && tool === 'pen') {
-      if (pen.length >= 3 && dist(raw, pen[0]) < CLOSE_PX / zoom) finishPen(pen, true)
-      else setPen([...pen, p])
+      if (pen.length >= 3 && dist(raw, pen[0].point) < CLOSE_PX / zoom) finishPen(pen, true)
+      else {
+        e.currentTarget.setPointerCapture(e.pointerId)
+        setDrag({ kind: 'pen', node: { point: p } })
+      }
       return
     }
     e.currentTarget.setPointerCapture(e.pointerId)
@@ -311,6 +323,19 @@ export default function Canvas() {
       return
     }
     const target = e.target as Element
+    const pathNode = target.closest('[data-path-node]')
+    if (design && pathNode) {
+      const id = pathNode.getAttribute('data-path-id')
+      const index = Number(pathNode.getAttribute('data-path-node'))
+      const control = pathNode.getAttribute('data-path-control')
+      if (id && Number.isInteger(index) && (control === 'point' || control === 'in' || control === 'out')) {
+        st.beginTransient()
+        const gesture: Extract<Drag, { kind: 'path' }> = { kind: 'path', id, index, control: control as 'point' | 'in' | 'out' }
+        pathDragRef.current = gesture
+        setDrag(gesture)
+        return
+      }
+    }
     const handle = target.closest('[data-handle]')?.getAttribute('data-handle')
     if (design && handle && frame) {
       st.beginTransient()
@@ -345,37 +370,60 @@ export default function Canvas() {
   const onPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
     const p = eventPoint(e)
     setCursor(p)
-    if (!drag) {
+    const gesture = drag ?? pathDragRef.current
+    if (!gesture) {
       setHover(selecting ? ((e.target as Element).closest('[data-id]')?.getAttribute('data-id') ?? null) : null)
       return
     }
-    if (drag.kind === 'pan') {
-      useAppStore.getState().setView({ panX: drag.panX + e.clientX - drag.cx, panY: drag.panY + e.clientY - drag.cy })
-    } else if (drag.kind === 'transform') {
-      const next = new Map(drag.apply(p, e.shiftKey, gridFor(e)).map((s) => [s.id, s]))
-      useAppStore.getState().updateShapes(drag.ids, (s) => next.get(s.id) ?? s)
+    if (gesture.kind === 'pan') {
+      useAppStore.getState().setView({ panX: gesture.panX + e.clientX - gesture.cx, panY: gesture.panY + e.clientY - gesture.cy })
+    } else if (gesture.kind === 'pen') {
+      setDrag({ kind: 'pen', node: dist(p, gesture.node.point) * zoom < 3 ? { point: gesture.node.point } : draggedPenNode(gesture.node.point, p) })
+    } else if (gesture.kind === 'path') {
+      const shape = project.shapes.find((s): s is PathShape => s.id === gesture.id && s.type === 'path')
+      if (!shape) return
+      const nodes = pathNodes(shape.points, shape.nodes)
+      const local = toLocal(shape, snapPoint(p, gridFor(e)))
+      const node = nodes[gesture.index]
+      if (!node) return
+      const next = nodes.map((n) => ({ ...n }))
+      if (gesture.control === 'point') {
+        const dx = local[0] - node.point[0]
+        const dy = local[1] - node.point[1]
+        next[gesture.index] = { point: local, ...(node.in && { in: [node.in[0] + dx, node.in[1] + dy] as Point }), ...(node.out && { out: [node.out[0] + dx, node.out[1] + dy] as Point }) }
+      } else {
+        const opposite = gesture.control === 'in' ? 'out' : 'in'
+        next[gesture.index] = { ...node, [gesture.control]: local, [opposite]: [2 * node.point[0] - local[0], 2 * node.point[1] - local[1]] }
+      }
+      useAppStore.getState().updateShapes([shape.id], (s) => (s.type === 'path' ? { ...s, nodes: next, points: penPoints(next, s.closed) } : s))
+    } else if (gesture.kind === 'transform') {
+      const next = new Map(gesture.apply(p, e.shiftKey, gridFor(e)).map((s) => [s.id, s]))
+      useAppStore.getState().updateShapes(gesture.ids, (s) => next.get(s.id) ?? s)
     } else {
-      setDrag({ ...drag, current: drag.kind === 'create' ? snapPoint(p, gridFor(e)) : p, shift: e.shiftKey })
+      setDrag({ ...gesture, current: gesture.kind === 'create' ? snapPoint(p, gridFor(e)) : p, shift: e.shiftKey })
     }
   }
 
   const onPointerUp = (e: React.PointerEvent<SVGSVGElement>) => {
-    if (!drag) return
+    const gesture = drag ?? pathDragRef.current
+    if (!gesture) return
     const st = useAppStore.getState()
     const p = eventPoint(e)
-    if (drag.kind === 'transform') st.commit()
-    if (drag.kind === 'marquee' && (p[0] !== drag.start[0] || p[1] !== drag.start[1])) {
-      const box = rectBounds(drag.start, p)
+    if (gesture.kind === 'transform' || gesture.kind === 'path') st.commit()
+    if (gesture.kind === 'pen') setPen([...pen, gesture.node])
+    if (gesture.kind === 'marquee' && (p[0] !== gesture.start[0] || p[1] !== gesture.start[1])) {
+      const box = rectBounds(gesture.start, p)
       const hits = project.shapes.filter((s) => overlaps(box, shapeBounds(s))).map((s) => s.id)
-      st.setSelection([...new Set([...drag.keep, ...hits])])
+      st.setSelection([...new Set([...gesture.keep, ...hits])])
     }
-    if (drag.kind === 'create' && tool !== 'select' && tool !== 'pen' && tool !== 'text') {
-      const shape = makeShape(tool, drag.start, snapPoint(p, gridFor(e)), e.shiftKey, 3 / zoom, newId())
+    if (gesture.kind === 'create' && tool !== 'select' && tool !== 'pen' && tool !== 'text') {
+      const shape = makeShape(tool, gesture.start, snapPoint(p, gridFor(e)), e.shiftKey, 3 / zoom, newId())
       if (shape) {
         st.addShape(shape)
         st.setTool('select')
       }
     }
+    pathDragRef.current = null
     setDrag(null)
   }
 
@@ -389,7 +437,10 @@ export default function Canvas() {
 
   const preview =
     drag?.kind === 'create' && tool !== 'select' && tool !== 'pen' && tool !== 'text' ? makeShape(tool, drag.start, drag.current, drag.shift, 3 / zoom) : null
-  const penPreview = pen.length && cursor ? [...pen, cursor] : pen
+  const activePen = drag?.kind === 'pen' ? [...pen, drag.node] : pen
+  const penPreview = penPoints(activePen.length && cursor && drag?.kind !== 'pen' ? [...activePen, { point: cursor }] : activePen, false)
+  const editablePath = step === 'design' && tool === 'select' && selection.length === 1 ? project.shapes.find((s): s is PathShape => s.id === selection[0] && s.type === 'path') : undefined
+  const editableNodes = editablePath && pathNodes(editablePath.points, editablePath.nodes)
   const corner = toScreen([0, 0])
   const zero = toScreen([project.origin.x, project.origin.y])
 
@@ -519,15 +570,48 @@ export default function Canvas() {
           <path className="axis-y" d={`M${zero[0]} ${zero[1]}v-24`} />
           <circle cx={zero[0]} cy={zero[1]} r={3} />
         </g>
-        {pen.length > 0 && <circle className="pen-start" cx={toScreen(pen[0])[0]} cy={toScreen(pen[0])[1]} r={CLOSE_PX / 2} />}
+        {activePen.length > 0 && (
+          <g className="pen-nodes">
+            {activePen.flatMap((node, i) => {
+              const anchor = toScreen(node.point)
+              return [
+                node.in && <line key={`${i}-in-line`} x1={anchor[0]} y1={anchor[1]} x2={toScreen(node.in)[0]} y2={toScreen(node.in)[1]} />,
+                node.out && <line key={`${i}-out-line`} x1={anchor[0]} y1={anchor[1]} x2={toScreen(node.out)[0]} y2={toScreen(node.out)[1]} />,
+                node.in && <circle key={`${i}-in`} className="pen-control" cx={toScreen(node.in)[0]} cy={toScreen(node.in)[1]} r={3} />,
+                node.out && <circle key={`${i}-out`} className="pen-control" cx={toScreen(node.out)[0]} cy={toScreen(node.out)[1]} r={3} />,
+                <circle key={`${i}-anchor`} className={i ? 'pen-anchor' : 'pen-start'} cx={anchor[0]} cy={anchor[1]} r={i ? 3 : CLOSE_PX / 2} />,
+              ]
+            })}
+          </g>
+        )}
         {drag?.kind === 'marquee' && (
           <polygon className="marquee" points={pts([drag.start, [drag.current[0], drag.start[1]], drag.current, [drag.start[0], drag.current[1]]])} />
         )}
         {overlay}
+        {editablePath && editableNodes && (
+          <g className="path-nodes">
+            {editableNodes.flatMap((node, i) => {
+              const anchor = toScreen(toWorld(editablePath, node.point))
+              const marker = (control: 'point' | 'in' | 'out', point: Point, cls: string, r: number) => {
+                const [x, y] = toScreen(toWorld(editablePath, point))
+                return <circle key={`${i}-${control}`} data-path-id={editablePath.id} data-path-node={i} data-path-control={control} className={cls} cx={x} cy={y} r={r} />
+              }
+              return [
+                node.in && <line key={`${i}-in-line`} x1={anchor[0]} y1={anchor[1]} x2={toScreen(toWorld(editablePath, node.in))[0]} y2={toScreen(toWorld(editablePath, node.in))[1]} />,
+                node.out && <line key={`${i}-out-line`} x1={anchor[0]} y1={anchor[1]} x2={toScreen(toWorld(editablePath, node.out))[0]} y2={toScreen(toWorld(editablePath, node.out))[1]} />,
+                node.in && marker('in', node.in, 'path-control', 3),
+                node.out && marker('out', node.out, 'path-control', 3),
+                marker('point', node.point, 'path-anchor', 4),
+              ]
+            })}
+          </g>
+        )}
       </svg>
       <div className="canvas-status" aria-live="off">
         {cursor ? `X ${formatLength(cursor[0] - project.origin.x, units)}  Y ${formatLength(cursor[1] - project.origin.y, units)} ${units}` : ' '}
         <span className="grid-step">Grid {grid.label}</span>
+        {tool === 'pen' && <span className="pen-hint">Click for corners · drag for curves · Enter to finish</span>}
+        {editablePath && <span className="pen-hint">Drag anchors or handles to edit this path</span>}
         {status && (
           <span className="status-error" role="alert">
             {status}

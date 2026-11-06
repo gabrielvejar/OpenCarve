@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { effectiveBit } from '../lib/library'
+import { configuredBitRoles } from '../model'
 import { useAppStore } from '../store'
 import type { SimInput, SimResult } from './sim'
 import type { ProgressRequest, ProgressUpdate } from './simWorker'
@@ -90,8 +91,8 @@ export function useSim() {
     if (camBusy) return
     const t = setTimeout(
       () => {
-        const p = { bits, bitOverrides }
-        run({ stock, ops: cam?.ops ?? [], settings, bits: { rough: effectiveBit(p, 'rough'), ...(bits.detail && { detail: effectiveBit(p, 'detail') }) } })
+        const p = useAppStore.getState().project
+        run({ stock, ops: cam?.ops ?? [], settings, bits: Object.fromEntries(configuredBitRoles(p).map((role) => [role, effectiveBit(p, role)])) })
       },
       DEBOUNCE_MS,
     )

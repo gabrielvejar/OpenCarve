@@ -34,10 +34,19 @@ export interface PolygonShape extends ShapeBase {
   h: number
 }
 
+// Bézier anchors and their absolute local control points. Paths without nodes are legacy/imported polylines and
+// become editable straight-node paths when selected.
+export interface PathNode {
+  point: Point
+  in?: Point
+  out?: Point
+}
+
 export interface PathShape extends ShapeBase {
   type: 'path'
   points: Point[]
   closed: boolean
+  nodes?: PathNode[]
 }
 
 // w/h mirror the glyph bounds (kept in sync by fitText) so bounds work before the font has loaded.
@@ -109,8 +118,10 @@ export interface CutSettings {
   direction: 'climb' | 'conventional'
 }
 
-export type BitRole = 'rough' | 'detail'
-export type PocketPattern = 'concentric' | 'raster'
+export type BitRole = 'rough' | 'detail' | `tool-${string}`
+export type ProjectBits = Partial<Record<BitRole, string>> & { rough: string }
+export type ProjectCutSettings = Partial<Record<BitRole, CutSettings>> & { rough: CutSettings }
+export type PocketPattern = 'concentric' | 'raster' | 'crosshatch' | 'spiral' | 'radial'
 
 // Smallest values the app accepts; the store clamps edits to them and the loader rejects anything below.
 export const LIMITS = { stockSize: 1, thickness: 1, travel: 1, maxRpm: 1, safeZ: 0.5 }
@@ -126,6 +137,7 @@ export interface Cut {
   bit: 'auto' | BitRole
   pocketPattern: PocketPattern
   pocketAngle: number // degrees counter-clockwise from +X; raster only
+  pocketPrecut: boolean // score pocket walls with the smallest compatible bit before larger bits clear the interior
   side: 'outside' | 'inside' | 'on'
   depth: number // mm from top; >= stock.thickness means through
   tabs: boolean
@@ -163,16 +175,23 @@ export interface Project {
   units: Units
   stock: { w: number; h: number; thickness: number }
   materialId: string
-  // Rough bit cuts everything it fits in. The detail bit, when set, only rest-machines pockets (what the rough bit
-  // can't reach); outlines use the rough bit. A V-carve uses whichever role holds a V-bit (detail preferred).
-  bits: { rough: string; detail?: string }
-  cutSettings: { rough: CutSettings; detail?: CutSettings } // detail present iff bits.detail
-  cutSettingsCustom: Record<BitRole, boolean> // false = follow recommendedSettings
+  // bitOrder keeps stable UI/file identities. Machining normally runs flat/ballnose bits largest to smallest; an edge
+  // pre-cut moves the smallest one first. Automatic pockets rest-machine what the preceding size couldn't reach.
+  bits: ProjectBits
+  bitOrder: BitRole[]
+  cutSettings: ProjectCutSettings // one entry per configured bit
+  cutSettingsCustom: Partial<Record<BitRole, boolean>> // false = follow recommendedSettings
   bitOverrides: Partial<Record<BitRole, BitOverride>> // only fields that differ from the library bit; see effectiveBit
   machine: { name: string; w: number; h: number; maxRpm: number }
   origin: Origin
   gcode: GcodeBlocks
   shapes: Shape[]
+}
+
+export const configuredBitRoles = (p: Pick<Project, 'bits' | 'bitOrder'>) => p.bitOrder.filter((role) => !!p.bits[role])
+export const bitRoleLabel = (p: Pick<Project, 'bits' | 'bitOrder'>, role: BitRole) => {
+  const index = configuredBitRoles(p).indexOf(role)
+  return role === 'rough' ? 'Rough' : role === 'detail' && index === 1 ? 'Detail' : `Bit ${index + 1}`
 }
 
 // User G-code emitted before and after the toolpaths; replaceDefaults drops the standard setup and end lines.
@@ -217,6 +236,7 @@ export const defaultCut = (thickness: number): Cut => ({
   bit: 'auto',
   pocketPattern: 'concentric',
   pocketAngle: 0,
+  pocketPrecut: false,
   side: 'outside',
   depth: thickness,
   tabs: true,
@@ -252,8 +272,9 @@ export const newProject = (): Project => ({
   stock: { w: 300, h: 200, thickness: 12 },
   materialId: 'mdf',
   bits: { rough: '1/8-endmill' },
+  bitOrder: ['rough'],
   cutSettings: { rough: recommendedSettings(findMaterial('mdf'), findBit('1/8-endmill'), MACHINES[0].maxRpm) },
-  cutSettingsCustom: { rough: false, detail: false },
+  cutSettingsCustom: { rough: false },
   bitOverrides: {},
   machine: MACHINES[0],
   origin: { preset: 'bottom-left', x: 0, y: 0, z: 'top' },

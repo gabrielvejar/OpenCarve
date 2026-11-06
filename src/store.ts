@@ -1,11 +1,11 @@
 import { create } from 'zustand'
 import type { CamResult } from './cam/toolpath'
 import { onFontLoad } from './lib/fonts'
-import { polylineBounds, shapeBounds, shapeToPolylines } from './lib/geometry'
+import { polylineBounds, positiveReliefShape, shapeBounds, shapeToPolylines } from './lib/geometry'
 import { differingFields, effectiveBit, findBit, findMaterial, overrideError, recommendedSettings, vbitMaxDepth, vcarveBit } from './lib/library'
 import type { Units } from './lib/units'
 import type { SimResult } from './preview/sim'
-import { defaultCut, fitOrigin, gcodeBlockError, LIMITS, newId, newProject, validCut, type BitOverride, type BitRole, type Cut, type CutSettings, type Origin, type Project, type Shape, type ShapePatch } from './model'
+import { configuredBitRoles, defaultCut, fitOrigin, gcodeBlockError, LIMITS, newId, newProject, validCut, type BitOverride, type BitRole, type Cut, type CutSettings, type Origin, type Project, type ProjectCutSettings, type Shape, type ShapePatch } from './model'
 
 export type Step = 'settings' | 'design' | 'simulate' | 'export'
 export type Screen = 'home' | 'editor'
@@ -76,6 +76,7 @@ interface AppState {
   setSelection: (ids: string[]) => void
   setTool: (tool: Tool) => void
   align: (mode: Align) => void
+  makePositiveRelief: () => void
   nudge: (dx: number, dy: number) => void
   undo: () => void
   redo: () => void
@@ -102,15 +103,15 @@ const pushHistory = (past: Project[], project: Project) => [...past, project].sl
 
 const existing = (ids: string[], project: Project) => ids.filter((id) => project.shapes.some((s) => s.id === id))
 
-// Recomputes each bit's settings unless the user customised them; detail settings exist only with a detail bit.
+// Recomputes each bit's settings unless the user customised them.
 function recommended(p: Project): Project {
   const rec = (role: BitRole) =>
     (p.cutSettingsCustom[role] && p.cutSettings[role]) || recommendedSettings(findMaterial(p.materialId), effectiveBit(p, role), p.machine.maxRpm)
-  const { detail } = p.bits
+  const roles = configuredBitRoles(p)
   return {
     ...p,
-    cutSettings: { rough: rec('rough'), ...(detail && { detail: rec('detail') }) },
-    cutSettingsCustom: detail ? p.cutSettingsCustom : { ...p.cutSettingsCustom, detail: false },
+    cutSettings: Object.fromEntries(roles.map((role) => [role, rec(role)])) as ProjectCutSettings,
+    cutSettingsCustom: Object.fromEntries(roles.map((role) => [role, !!p.cutSettingsCustom[role]])),
   }
 }
 
@@ -217,6 +218,18 @@ export const useAppStore = create<AppState>()((set, get) => {
       )
     },
 
+    makePositiveRelief: () => {
+      const { project, selection } = get()
+      const shapes = project.shapes.filter((shape) => selection.includes(shape.id))
+      const relief = positiveReliefShape(shapes, newId(), project.stock.thickness)
+      if (!relief) {
+        set({ status: 'Select one closed outer shape and one or more fully contained closed shapes.' })
+        return
+      }
+      setProject((p) => ({ ...p, shapes: [...p.shapes.filter((shape) => !selection.includes(shape.id)), relief] }))
+      set({ selection: [relief.id], status: null })
+    },
+
     nudge: (dx, dy) => {
       const { selection } = get()
       if (selection.length) get().updateShapes(selection, (s) => ({ ...s, x: s.x + dx, y: s.y + dy }))
@@ -270,16 +283,19 @@ export const useAppStore = create<AppState>()((set, get) => {
     setMaterialId: (materialId) => setProject((p) => recommended({ ...p, materialId })),
     setBits: (bits) =>
       setProject((p) =>
-        recommended({
-          ...p,
-          bits,
-          // A different bit (or none) drops that role's override.
-          bitOverrides: Object.fromEntries(Object.entries(p.bitOverrides).filter(([r]) => bits[r as BitRole] === p.bits[r as BitRole])),
-          cutSettingsCustom: {
-            rough: p.cutSettingsCustom.rough && bits.rough === p.bits.rough,
-            detail: p.cutSettingsCustom.detail && bits.detail === p.bits.detail,
-          },
-        }),
+        (() => {
+          const present = Object.keys(bits) as BitRole[]
+          const bitOrder = [...p.bitOrder.filter((role) => bits[role]), ...present.filter((role) => !p.bitOrder.includes(role))]
+          return recommended({
+            ...p,
+            bits,
+            bitOrder,
+            shapes: p.shapes.map((shape) => (shape.cut && shape.cut.bit !== 'auto' && !bits[shape.cut.bit] ? { ...shape, cut: { ...shape.cut, bit: 'auto' } } : shape)),
+            // A different bit (or a removed slot) drops that role's override and custom settings.
+            bitOverrides: Object.fromEntries(Object.entries(p.bitOverrides).filter(([r]) => bits[r as BitRole] === p.bits[r as BitRole])),
+            cutSettingsCustom: Object.fromEntries(bitOrder.map((role) => [role, !!p.cutSettingsCustom[role] && bits[role] === p.bits[role]])),
+          })
+        })(),
       ),
     // Stores only fields that differ from the library bit; invalid overrides are ignored.
     setBitOverride: (role, patch) =>
@@ -290,7 +306,7 @@ export const useAppStore = create<AppState>()((set, get) => {
         const merged: BitOverride = patch ? { ...p.bitOverrides[role], ...patch } : {}
         if (overrideError(bit, merged)) return p
         const o = differingFields(bit, merged)
-        const bitOverrides = { ...p.bitOverrides, [role]: o }
+        const bitOverrides: Project['bitOverrides'] = { ...p.bitOverrides, [role]: o }
         if (!Object.keys(o).length) delete bitOverrides[role]
         return recommended({ ...p, bitOverrides })
       }),

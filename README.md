@@ -8,15 +8,16 @@ Free, open-source (AGPL-3.0) design and toolpath software for hobby CNC routers,
 
 ## Features
 
-- **Design**: rectangle, ellipse, polygon, pen (lines and closed paths) and text tools; move, scale, rotate, align, duplicate, nudge, undo/redo; snap to grid (G) with selectable sizes in mm or inches (hold Alt to bypass).
+- **Design**: rectangle, ellipse, polygon, pen (click for straight corners, drag for Bézier curves, close paths by clicking the first node, and later drag their anchors or handles to edit them) and text tools; move, scale, rotate, align, duplicate, nudge, undo/redo; snap to grid (G) with selectable sizes in mm or inches (hold Alt to bypass).
+- **Positive relief**: select a closed outer shape and one or more closed shapes inside it, then use **Make positive relief** to pocket the surrounding area while leaving the contained shapes as full-height islands.
 - **Text** with 16 bundled fonts, your own uploaded TTF/OTF fonts, and Google Fonts on demand via Fontsource (see [Fonts](#fonts)); multi-line text with left/centre/right alignment and line height, letter spacing, bend (arc text) and mirror.
 - **SVG import**: paths, basic shapes, transforms and groups (use Import or drop a file onto the editor).
 - **Materials, bits and cut settings**: pick a material and bits; feed, plunge, stepdown and RPM are filled in with recommended values you can override.
 - **Bit overrides**: adjust a library bit's diameter, and a V-bit's angle and flat tip, to match the bit you actually have. Overrides are saved in the project, marked "Custom" and can be reset; recommended settings follow the adjusted bit.
 - **Machine presets**: Generic GRBL, 3018, Onefinity Woodworker, Shapeoko 4 XL/XXL, TwoTrees TTC450 (500 W), X-Carve 750/1000, or a custom work area and max RPM.
 - **Selectable work zero**: put XY zero at any stock corner, the centre, or a custom offset, and Z zero at the top of the stock or its bottom (the spoilboard). The canvas marker, cursor readout, shape positions, 3D preview and G-code all follow it.
-- **Cuts**: outline (outside, inside or on the path, with tabs), pocket and V-carve. Each shape can use the automatic two-stage strategy, only the rough bit or only the detail bit. Pockets can use concentric clearing or parallel lines at any angle; overlapping pockets with the same pattern and angle are combined by depth so shared material is cleared only once.
-- **Two-stage carves**: in Automatic mode, a rough bit cuts outlines and clears pockets. An optional detail bit only rest-machines what the rough bit can't reach in pockets and V-carve floors; a V-bit as the detail bit also cuts the V-carves.
+- **Cuts**: outline (outside, inside or on the path, with tabs), pocket and V-carve. Each shape can use every configured bit automatically or be assigned to one specific bit. Pocket patterns include concentric, angled parallel lines, crosshatch, spiral and radial clearing; overlapping pockets with the same pattern and angle are combined by depth so shared material is cleared only once. An optional edge pre-cut scores outer walls and inner islands with the smallest bit before larger bits clear the pocket.
+- **Multi-bit carves**: configure as many bits as the job needs. In Automatic mode, flat cutters normally run from largest to smallest; the first fitting bit clears the pocket and each smaller bit only rest-machines what its predecessor couldn't reach. Edge pre-cutting moves the smallest-bit file to the front. V-bits finish V-carves, and Export produces one G-code file per bit in machining order.
 - **Simulate**: toolpaths on the 2D canvas, a 3D preview of the carved result, warnings and an estimated time.
 - **Toolpath animation**: watch a model of the bit run the job in the 3D preview in G-code order, with play/pause, 1×–50× speed and a scrub bar, and optionally see the material removed as it goes.
 - **Export** G-code for GRBL-compatible machines, one file per bit.
@@ -35,7 +36,7 @@ Free, open-source (AGPL-3.0) design and toolpath software for hobby CNC routers,
 2. **Design**: draw or import shapes and give each one a cut (outline, pocket or V-carve) and depth. With nothing selected, the panel summarises the project settings, with a link back to Settings.
 3. **Simulate**: check the toolpaths, the 3D preview and any warnings.
 4. **Export**: download the G-code file for each bit.
-5. **On the machine**: set XY and Z zero where the project's work zero says (Settings → Stock; the default is XY at the bottom-left corner and Z at the top of the stock). The Export step and the G-code header repeat it. For a two-bit carve, run the rough bit first, then change to the detail bit. After changing bits, re-zero Z only; don't move X or Y.
+5. **On the machine**: set XY and Z zero where the project's work zero says (Settings → Stock; the default is XY at the bottom-left corner and Z at the top of the stock). The Export step and the G-code header repeat it. Run bit files in the order shown in Export; edge pre-cut jobs deliberately put the smallest bit first. After changing bits, re-zero Z only; don't move X or Y.
 
 ## Safety
 
@@ -47,7 +48,7 @@ Tested in Chromium (Chrome, Edge); should work in Firefox and Safari. Toolpaths 
 
 ## Project files
 
-A `.oc` file is JSON: `{ "format": "opencarve", "version": 4, "project": { ... } }`. All lengths are in millimetres, whatever the display units. Newer versions of OpenCarve keep opening files saved by earlier versions.
+A `.oc` file is JSON: `{ "format": "opencarve", "version": 8, "project": { ... } }`. All lengths are in millimetres, whatever the display units. Newer versions of OpenCarve keep opening files saved by earlier versions.
 
 ## Development
 

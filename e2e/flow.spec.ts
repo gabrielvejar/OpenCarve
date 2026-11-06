@@ -60,9 +60,9 @@ test('designs, simulates, exports and reopens a two-bit sign', async ({ page }) 
   // Tab marks come from the planned toolpaths, one per placed tab.
   await expect(page.locator('[data-tab]')).toHaveCount(4)
   // Moving the shape drops its marks at once (read a frame later, well inside the replan debounce) until the new plan lands.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+  await page.keyboard.press('ArrowRight')
   const marksAfterNudge = await page.evaluate(async () => {
-    ;(document.activeElement as HTMLElement | null)?.blur()
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
     await new Promise(requestAnimationFrame)
     return document.querySelectorAll('[data-tab]').length
   })
@@ -70,6 +70,7 @@ test('designs, simulates, exports and reopens a two-bit sign', async ({ page }) 
   await expect(page.locator('[data-tab]')).toHaveCount(4)
 
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('button', { name: 'Add bit' }).click()
   await page.getByLabel('Detail bit').selectOption('60-vbit')
   await selectViaSimulate(page, 'Text')
   await page.getByRole('radio', { name: 'V-carve' }).click()
@@ -88,14 +89,14 @@ test('designs, simulates, exports and reopens a two-bit sign', async ({ page }) 
 
   await page.getByRole('button', { name: 'Export', exact: true }).click()
   const download = async (role: string) => {
-    const button = page.getByRole('button', { name: `Download ${role} G-code` })
+    const button = page.getByRole('button', { name: `Download ${role} G-code`, exact: true })
     await expect(button).toBeEnabled()
     return (await Promise.all([page.waitForEvent('download'), button.click()]))[0]
   }
-  const rough = await download('rough')
+  const rough = await download('Rough')
   expect(rough.suggestedFilename()).toBe('Sign-1_8_ (3.175 mm) endmill.nc')
   expect(await text(rough)).toContain('G21 G90 G17 G94')
-  const detail = await download('detail')
+  const detail = await download('Detail')
   expect(detail.suggestedFilename()).toBe('Sign-60° V-bit, 1_2_ (12.7 mm).nc')
   expect(await text(detail)).toMatch(/^G1 .*X-?[\d.]+ Y-?[\d.]+ Z-?[\d.]+/m)
 
@@ -132,7 +133,7 @@ test('work zero at the centre shifts the readout, inspector and G-code', async (
 
   await page.getByRole('button', { name: 'Export', exact: true }).click()
   await expect(page.getByText('Set XY zero at the centre of the stock and Z zero at the top of the stock.')).toBeVisible()
-  const button = page.getByRole('button', { name: 'Download rough G-code' })
+  const button = page.getByRole('button', { name: 'Download Rough G-code' })
   await expect(button).toBeEnabled()
   const g = await text((await Promise.all([page.waitForEvent('download'), button.click()]))[0])
   expect(g).toContain('; XY zero: centre of stock')

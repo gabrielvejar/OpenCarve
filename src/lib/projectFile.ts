@@ -1,12 +1,12 @@
-import { fitOrigin, gcodeBlockError, LIMITS, MAX_STEPOVER, newId, newProject, validCut, type BitOverride, type BitRole, type Cut, type CutSettings, type Origin, type Point, type Polyline, type Project, type Shape } from '../model'
+import { fitOrigin, gcodeBlockError, LIMITS, MAX_STEPOVER, newId, newProject, validCut, type BitOverride, type BitRole, type Cut, type CutSettings, type Origin, type PathNode, type Point, type Polyline, type Project, type ProjectBits, type ProjectCutSettings, type Shape } from '../model'
 import { FONTS, fontFamily, MAX_FONT_BYTES, type StoredFont } from './fonts'
 import { BITS, differingFields, findBit, findMaterial, MATERIALS, overrideError } from './library'
 
 // A self-contained, versioned document: the same JSON is the download format and the IndexedDB record,
 // so a sync backend can store it verbatim later.
 export const FILE_FORMAT = 'opencarve'
-// Version 2 is the first public format; v3 adds each cut's bit choice and v4 its pocket pattern. Older versions migrate below.
-export const FILE_VERSION = 4
+// v3 adds bit choice, v4 pocket patterns, v5 more patterns, v6 extensible bits, v7 pocket edge pre-cutting and v8 Bézier path nodes.
+export const FILE_VERSION = 8
 
 export type EmbeddedFonts = Record<string, Omit<StoredFont, 'id'>>
 
@@ -65,13 +65,32 @@ function points(v: unknown, what: string): Point[] {
   )
 }
 
-function cut(v: unknown, what: string): Cut {
+function pathNodes(v: unknown, what: string): PathNode[] {
+  if (!Array.isArray(v)) fail(`${what} must be an array`)
+  const point = (value: unknown, label: string): Point => {
+    const ps = points([value], label)
+    return ps[0]
+  }
+  return (v as unknown[]).map((value, i) => {
+    const node = obj(value, `${what}[${i}]`)
+    return {
+      point: point(field(node, 'point', `${what}[${i}]`), `${what}[${i}].point`),
+      ...(node.in !== undefined && { in: point(node.in, `${what}[${i}].in`) }),
+      ...(node.out !== undefined && { out: point(node.out, `${what}[${i}].out`) }),
+    }
+  })
+}
+
+function cut(v: unknown, what: string, roles: BitRole[]): Cut {
   const o = obj(v, what)
+  const bit = str(o, 'bit', what)
+  if (bit !== 'auto' && !roles.includes(bit as BitRole)) fail(`${what}.bit must be auto or a configured bit`)
   return {
     type: oneOf(o, 'type', what, ['outline', 'pocket', 'vcarve'] as const),
-    bit: oneOf(o, 'bit', what, ['auto', 'rough', 'detail'] as const),
-    pocketPattern: oneOf(o, 'pocketPattern', what, ['concentric', 'raster'] as const),
+    bit: bit as Cut['bit'],
+    pocketPattern: oneOf(o, 'pocketPattern', what, ['concentric', 'raster', 'crosshatch', 'spiral', 'radial'] as const),
     pocketAngle: num(o, 'pocketAngle', what),
+    pocketPrecut: bool(o, 'pocketPrecut', what),
     side: oneOf(o, 'side', what, ['outside', 'inside', 'on'] as const),
     depth: num(o, 'depth', what),
     tabs: bool(o, 'tabs', what),
@@ -81,7 +100,7 @@ function cut(v: unknown, what: string): Cut {
   }
 }
 
-function shape(v: unknown, i: number, thickness: number, warn: (msg: string) => void): Shape {
+function shape(v: unknown, i: number, thickness: number, roles: BitRole[], warn: (msg: string) => void): Shape {
   const what = `shapes[${i}]`
   const o = obj(v, what)
   const type = oneOf(o, 'type', what, ['rect', 'ellipse', 'polygon', 'path', 'text', 'compound'] as const)
@@ -104,7 +123,7 @@ function shape(v: unknown, i: number, thickness: number, warn: (msg: string) => 
       s = { ...base, type, ...size(), sides: Math.min(64, Math.max(3, Math.round(num(o, 'sides', what)))) }
       break
     case 'path':
-      s = { ...base, type, points: points(o.points, `${what}.points`), closed: bool(o, 'closed', what) }
+      s = { ...base, type, points: points(o.points, `${what}.points`), closed: bool(o, 'closed', what), ...(o.nodes !== undefined && { nodes: pathNodes(o.nodes, `${what}.nodes`) }) }
       break
     case 'text': {
       let font = str(o, 'font', what)
@@ -150,7 +169,7 @@ function shape(v: unknown, i: number, thickness: number, warn: (msg: string) => 
       s = { ...base, type, paths }
     }
   }
-  return o.cut === undefined ? s : { ...s, cut: validCut(s, cut(o.cut, `${what}.cut`), thickness) }
+  return o.cut === undefined ? s : { ...s, cut: validCut(s, cut(o.cut, `${what}.cut`, roles), thickness) }
 }
 
 function settings(v: unknown, what: string): CutSettings {
@@ -170,7 +189,7 @@ function settings(v: unknown, what: string): CutSettings {
 function overrides(v: unknown, bits: Project['bits'], warnings: string[]): Project['bitOverrides'] {
   const out: Project['bitOverrides'] = {}
   for (const [role, ov] of Object.entries(obj(v, 'bitOverrides'))) {
-    const id = role === 'rough' || role === 'detail' ? bits[role] : undefined
+    const id = bits[role as BitRole]
     const o: BitOverride = isObj(ov) ? Object.fromEntries(['diameter', 'angle', 'flat'].filter((k) => ov[k] !== undefined).map((k) => [k, ov[k]])) : {}
     const error = !id ? `no ${role} bit` : !isObj(ov) ? 'not an object' : overrideError(findBit(id), o)
     if (error) warnings.push(`Ignored the ${role} bit override: ${error}.`)
@@ -270,8 +289,26 @@ function projectFromData(data: unknown, warnings: string[]): Project {
       if (!isObj(value) || value.cut === undefined) return value
       return { ...value, cut: { ...obj(value.cut, 'cut'), pocketPattern: 'concentric', pocketAngle: 0 } }
     })
-    file = { ...file, version: FILE_VERSION, project: { ...oldProject, shapes } }
+    file = { ...file, version: 4, project: { ...oldProject, shapes } }
   }
+  if (file.version === 4) file = { ...file, version: 5 }
+  if (file.version === 5) {
+    const oldProject = obj(file.project, 'project')
+    const oldBits = obj(oldProject.bits, 'bits')
+    file = { ...file, version: 6, project: { ...oldProject, bitOrder: ['rough', ...(oldBits.detail === undefined ? [] : ['detail'])] } }
+  }
+  if (file.version === 6) {
+    const oldProject = obj(file.project, 'project')
+    const oldShapes = Array.isArray(oldProject.shapes) ? oldProject.shapes : fail('shapes must be an array')
+    const shapes = oldShapes.map((value: unknown) => {
+      if (!isObj(value) || value.cut === undefined) return value
+      return { ...value, cut: { ...obj(value.cut, 'cut'), pocketPrecut: false } }
+    })
+    file = { ...file, version: 7, project: { ...oldProject, shapes } }
+  }
+  // v8 stores Bézier control nodes when a path has them. v7 paths remain valid polylines and gain straight nodes
+  // only if the user edits them, preserving imported and existing project geometry exactly.
+  if (file.version === 7) file = { ...file, version: FILE_VERSION }
   if (file.version !== FILE_VERSION) fail(`unsupported version ${String(file.version)} (this app reads version ${FILE_VERSION})`)
   const p = obj(file.project, 'project')
   const defaultMaterial = newProject().materialId
@@ -286,17 +323,28 @@ function projectFromData(data: unknown, warnings: string[]): Project {
   const mo = obj(p.machine, 'machine')
   const machine = { name: str(mo, 'name', 'machine'), w: num(mo, 'w', 'machine', LIMITS.travel), h: num(mo, 'h', 'machine', LIMITS.travel), maxRpm: num(mo, 'maxRpm', 'machine', LIMITS.maxRpm) }
   const bo = obj(p.bits, 'bits')
-  const detail = bo.detail === undefined ? undefined : str(bo, 'detail', 'bits')
-  const bits = { rough: str(bo, 'rough', 'bits'), ...(detail && { detail }) }
-  for (const id of [bits.rough, detail]) if (id !== undefined && !BITS.some((b) => b.id === id)) fail(`unknown bit ${id}`)
+  const validRole = (role: string): role is BitRole => role === 'rough' || role === 'detail' || /^tool-[a-zA-Z0-9-]+$/.test(role)
+  const bits = Object.fromEntries(
+    Object.entries(bo).map(([role, value]) => {
+      if (!validRole(role)) fail(`bits has invalid role ${role}`)
+      const id = typeof value === 'string' ? value : fail(`bits.${role} must be a string`)
+      if (!BITS.some((b) => b.id === id)) fail(`unknown bit ${id}`)
+      return [role, id]
+    }),
+  ) as ProjectBits
+  if (!bits.rough) fail('bits.rough is missing')
+  if (p.bitOrder === undefined) fail('bitOrder is missing')
+  const rawBitOrder: unknown[] = Array.isArray(p.bitOrder) ? p.bitOrder : fail('bitOrder must be an array')
+  const bitOrder = rawBitOrder.map((role, i) => (typeof role === 'string' && validRole(role) ? role : fail(`bitOrder[${i}] is invalid`)))
+  if (new Set(bitOrder).size !== bitOrder.length || bitOrder[0] !== 'rough' || bitOrder.some((role) => !bits[role]) || Object.keys(bits).some((role) => !bitOrder.includes(role as BitRole)))
+    fail('bitOrder must contain every configured bit exactly once, with rough first')
   const bitOverrides = overrides(p.bitOverrides, bits, warnings)
   const co = obj(p.cutSettings, 'cutSettings')
-  if (!detail && co.detail !== undefined) fail('cutSettings.detail is present without a detail bit')
   const custom = obj(p.cutSettingsCustom, 'cutSettingsCustom')
   if (!Array.isArray(p.shapes)) fail('shapes must be an array')
   const ids = new Set<string>()
   const shapes = (p.shapes as unknown[]).map((v, i) => {
-    const s = shape(v, i, stock.thickness, (msg) => warnings.includes(msg) || warnings.push(msg))
+    const s = shape(v, i, stock.thickness, bitOrder, (msg) => warnings.includes(msg) || warnings.push(msg))
     if (ids.has(s.id)) s.id = newId() // ids must be unique for selection and toolpath ops
     ids.add(s.id)
     return s
@@ -309,14 +357,9 @@ function projectFromData(data: unknown, warnings: string[]): Project {
     stock,
     materialId,
     bits,
-    cutSettings: {
-      rough: settings(co.rough, 'cutSettings.rough'),
-      ...(detail && { detail: settings(co.detail, 'cutSettings.detail') }),
-    },
-    cutSettingsCustom: {
-      rough: bool(custom, 'rough', 'cutSettingsCustom'),
-      detail: bool(custom, 'detail', 'cutSettingsCustom') && !!detail,
-    },
+    bitOrder,
+    cutSettings: Object.fromEntries(bitOrder.map((role) => [role, settings(field(co, role, 'cutSettings'), `cutSettings.${role}`)])) as ProjectCutSettings,
+    cutSettingsCustom: Object.fromEntries(bitOrder.map((role) => [role, bool(custom, role, 'cutSettingsCustom')])),
     bitOverrides,
     machine,
     origin: origin(p.origin, stock, warnings),

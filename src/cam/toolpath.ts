@@ -15,9 +15,9 @@ import {
   type PolyPathD,
 } from 'clipper2-ts'
 import { polylineBounds, shapeToPolylines } from '../lib/geometry'
-import { effectiveBit, vbitMaxDepth } from '../lib/library'
+import { effectiveBit, machiningBitRoles, vbitMaxDepth } from '../lib/library'
 import { formatLength } from '../lib/units'
-import { MAX_STEPOVER, tabsActive, type BitRole, type Cut, type CutSettings, type Point, type Project, type Shape } from '../model'
+import { configuredBitRoles, MAX_STEPOVER, tabsActive, type BitRole, type Cut, type CutSettings, type Point, type Project, type Shape } from '../model'
 import { opTimes } from './gcode'
 import { medialAxis, SPACING, type MedialPoint } from './vcarve'
 
@@ -32,7 +32,7 @@ export interface Op {
   role: BitRole
   shapeId: string
   shapeIds?: string[] // combined operations; shapeId stays as the primary id for file compatibility
-  kind: 'outline' | 'pocket' | 'pocket-detail' | 'vcarve' | 'vcarve-clear'
+  kind: 'outline' | 'pocket' | 'pocket-edge' | 'pocket-detail' | 'vcarve' | 'vcarve-clear'
   segments: Segment[]
   tabs?: Tab[]
   timeSec?: number // set by planProject
@@ -46,7 +46,7 @@ export interface CamResult {
   ops: Op[]
   shapes?: Shape[] // the project's shapes it was planned from (set on the main thread; the worker only sees copies)
   warnings: string[]
-  timeSec: Record<BitRole, number>
+  timeSec: Partial<Record<BitRole, number>>
 }
 
 const PRECISION = 3 // decimals, 0.001 mm
@@ -318,38 +318,113 @@ const rotatePoint = (p: { x: number; y: number }, angle: number) => {
   return { x: p.x * c - p.y * s, y: p.x * s + p.y * c }
 }
 
-function rasterPlan(region: PathsD, r: number, s: CutSettings, degrees: number) {
+function rasterPaths(island: PathsD, step: number, angle: number) {
+  const rotated = island.map((path) => path.map((p) => rotatePoint(p, -angle)))
+  const ys = rotated.flat().map((p) => p.y)
+  const [minY, maxY] = [Math.min(...ys), Math.max(...ys)]
+  const count = Math.max(1, Math.ceil((maxY - minY) / step))
+  const spacing = (maxY - minY) / count
+  const paths: Point[][] = []
+  for (let row = 0; row < count; row++) {
+    const y = minY + (row + 0.5) * spacing
+    const xs: number[] = []
+    for (const path of rotated) {
+      for (let i = 0; i < path.length; i++) {
+        const [a, b] = [path[i], path[(i + 1) % path.length]]
+        if ((a.y <= y && b.y > y) || (b.y <= y && a.y > y)) xs.push(a.x + ((y - a.y) * (b.x - a.x)) / (b.y - a.y))
+      }
+    }
+    xs.sort((a, b) => a - b)
+    for (let i = 0; i + 1 < xs.length; i += 2) {
+      const line = [rotatePoint({ x: xs[i], y }, angle), rotatePoint({ x: xs[i + 1], y }, angle)].map((p): Point => [p.x, p.y])
+      paths.push((row + i / 2) % 2 ? line.reverse() : line)
+    }
+  }
+  return paths
+}
+
+function clipSegment(a: Point, b: Point, wall: PathsD): Point[][] {
+  const [dx, dy] = [b[0] - a[0], b[1] - a[1]]
+  const ts = [0, 1]
+  for (const path of wall) {
+    for (let i = 0; i < path.length; i++) {
+      const [p, q] = [path[i], path[(i + 1) % path.length]]
+      const [ex, ey] = [q.x - p.x, q.y - p.y]
+      const den = dx * ey - dy * ex
+      if (Math.abs(den) < 1e-12) continue
+      const t = ((p.x - a[0]) * ey - (p.y - a[1]) * ex) / den
+      const u = ((p.x - a[0]) * dy - (p.y - a[1]) * dx) / den
+      if (t > 1e-9 && t < 1 - 1e-9 && u >= -1e-9 && u <= 1 + 1e-9) ts.push(t)
+    }
+  }
+  ts.sort((a, b) => a - b)
+  const unique = ts.filter((t, i) => !i || t - ts[i - 1] > 1e-9)
+  const at = (t: number): Point => [a[0] + t * dx, a[1] + t * dy]
+  return unique.slice(1).flatMap((hi, i) => (inside(at((unique[i] + hi) / 2), wall) ? [[at(unique[i]), at(hi)]] : []))
+}
+
+function radialPaths(island: PathsD, step: number, angle: number) {
+  const pts = island.flat()
+  const xs = pts.map((p) => p.x)
+  const ys = pts.map((p) => p.y)
+  const centre: Point = [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2]
+  const radius = Math.max(...pts.map((p) => Math.hypot(p.x - centre[0], p.y - centre[1]))) + step
+  const count = Math.max(1, Math.ceil((Math.PI * radius) / step))
+  return Array.from({ length: count }, (_, i) => angle + (i * Math.PI) / count).flatMap((a, i) => {
+    const [dx, dy] = [Math.cos(a) * radius, Math.sin(a) * radius]
+    const pieces = clipSegment([centre[0] - dx, centre[1] - dy], [centre[0] + dx, centre[1] + dy], island)
+    return i % 2 ? pieces.map((p) => p.reverse()) : pieces
+  })
+}
+
+function spiralPaths(island: PathsD, step: number, angle: number, direction: CutSettings['direction']) {
+  const pts = island.flat()
+  const xs = pts.map((p) => p.x)
+  const ys = pts.map((p) => p.y)
+  const centre: Point = [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2]
+  const radius = Math.max(...pts.map((p) => Math.hypot(p.x - centre[0], p.y - centre[1]))) + step
+  const thetaMax = (2 * Math.PI * radius) / step
+  const sign = direction === 'climb' ? 1 : -1
+  const raw: Point[] = [centre]
+  let theta = 0
+  while (theta < thetaMax) {
+    const r = (step * theta) / (2 * Math.PI)
+    const segment = Math.max(0.25, Math.min(1, step))
+    theta = Math.min(thetaMax, theta + Math.min(0.25, segment / Math.max(r, step / (2 * Math.PI))))
+    const nextR = (step * theta) / (2 * Math.PI)
+    const a = angle + sign * theta
+    raw.push([centre[0] + nextR * Math.cos(a), centre[1] + nextR * Math.sin(a)])
+  }
+  const paths: Point[][] = []
+  for (let i = 1; i < raw.length; i++) {
+    for (const piece of clipSegment(raw[i - 1], raw[i], island)) {
+      const last = paths.at(-1)
+      if (last && Math.hypot(last.at(-1)![0] - piece[0][0], last.at(-1)![1] - piece[0][1]) < 1e-6) last.push(piece[1])
+      else paths.push(piece)
+    }
+  }
+  return paths
+}
+
+function patternedPocketPlan(region: PathsD, r: number, s: CutSettings, pattern: Cut['pocketPattern'], degrees: number) {
   const angle = (degrees * Math.PI) / 180
   const step = Math.min(MAX_STEPOVER, s.stepover) * 2 * r
   return islands(inflate(region, -r)).map((island) => {
-    const rotated = island.map((path) => path.map((p) => rotatePoint(p, -angle)))
-    const ys = rotated.flat().map((p) => p.y)
-    const [minY, maxY] = [Math.min(...ys), Math.max(...ys)]
-    const count = Math.max(1, Math.ceil((maxY - minY) / step))
-    const spacing = (maxY - minY) / count
-    const paths: Point[][] = []
-    for (let row = 0; row < count; row++) {
-      const y = minY + (row + 0.5) * spacing
-      const xs: number[] = []
-      for (const path of rotated) {
-        for (let i = 0; i < path.length; i++) {
-          const [a, b] = [path[i], path[(i + 1) % path.length]]
-          if ((a.y <= y && b.y > y) || (b.y <= y && a.y > y)) xs.push(a.x + ((y - a.y) * (b.x - a.x)) / (b.y - a.y))
-        }
-      }
-      xs.sort((a, b) => a - b)
-      for (let i = 0; i + 1 < xs.length; i += 2) {
-        const line = [rotatePoint({ x: xs[i], y }, angle), rotatePoint({ x: xs[i + 1], y }, angle)].map((p): Point => [p.x, p.y])
-        paths.push((row + i / 2) % 2 ? line.reverse() : line)
-      }
-    }
-    // Finish on the exact tool-centre wall after the raster has cleared the interior.
+    const paths =
+      pattern === 'raster'
+        ? rasterPaths(island, step, angle)
+        : pattern === 'crosshatch'
+          ? [...rasterPaths(island, step, angle), ...rasterPaths(island, step, angle + Math.PI / 2)]
+          : pattern === 'radial'
+            ? radialPaths(island, step, angle)
+            : spiralPaths(island, step, angle, s.direction)
+    // Finish on the exact tool-centre wall after the pattern has cleared the interior.
     paths.push(...island.map((p) => closedPts(orient(p, areaD(p) < 0, s.direction))))
     return { wall: island, paths }
   })
 }
 
-function cutRasterLevel(plan: ReturnType<typeof rasterPlan>, L: ReturnType<typeof linker>, z: number) {
+function cutPatternLevel(plan: ReturnType<typeof patternedPocketPlan>, L: ReturnType<typeof linker>, z: number) {
   for (const island of plan) {
     let previous = false
     for (const path of island.paths) {
@@ -370,8 +445,24 @@ function layeredPocketSegments(pockets: { region: PathsD; depth: number }[], r: 
   for (const depth of levels) {
     const active = pockets.filter((p) => p.depth + 1e-9 >= depth).flatMap((p) => p.region)
     const region = boolean(ClipType.Union, active, null)
-    if (pattern === 'raster') cutRasterLevel(rasterPlan(region, r, s, angle), L, -depth)
+    if (pattern !== 'concentric') cutPatternLevel(patternedPocketPlan(region, r, s, pattern, angle), L, -depth)
     else cutPocketLevel(pocketPlan(region, r, s), L, -depth)
+  }
+  return L.finish()
+}
+
+// Scores every current pocket wall, including hole/island boundaries, before a wider bit reaches it.
+function pocketEdgeSegments(pockets: { region: PathsD; depth: number }[], r: number, s: CutSettings) {
+  const raw = pockets.flatMap((p) => zLevels(p.depth, s.stepdown).map((z) => -z)).sort((a, b) => a - b)
+  const levels = raw.filter((d, i) => !i || d - raw[i - 1] > 1e-9)
+  const L = linker(s.safeZ)
+  for (const depth of levels) {
+    const active = pockets.filter((p) => p.depth + 1e-9 >= depth).flatMap((p) => p.region)
+    for (const path of inflate(boolean(ClipType.Union, active, null), -r)) {
+      const points = closedPts(orient(path, areaD(path) < 0, s.direction))
+      L.moveTo([...points[0], -depth], false)
+      L.cut(points.slice(1).map((p): Pt3 => [...p, -depth]))
+    }
   }
   return L.finish()
 }
@@ -456,48 +547,59 @@ const narrowerThanFlat = (chains: MedialPoint[][], f: number) =>
   f > 0 && chains.some((c) => clipBand(c, -1, f).some((piece) => piece.reduce((a, q, i) => a + (i ? Math.hypot(q[0] - piece[i - 1][0], q[1] - piece[i - 1][1]) : 0), 0) > 4 * f))
 
 export function planProject(project: Project): CamResult {
-  const { stock, bits, cutSettings, machine } = project
+  const { stock, cutSettings, machine } = project
   const t = stock.thickness
   const ops: Op[] = []
   const last: Op[] = [] // through outlines not cut inside, run after everything else so parts aren't freed early
-  let freed = false // a held-back outline without tabs
+  const freedRoles = new Set<BitRole>() // roles with a held-back outline that has no tabs
   const warnings: string[] = []
   if (stock.w > machine.w || stock.h > machine.h) {
     const size = (w: number, h: number) => `${+formatLength(w, project.units)}×${+formatLength(h, project.units)} ${project.units}`
     warnings.push(`Stock (${size(stock.w, stock.h)}) is larger than the machine work area (${size(machine.w, machine.h)})`)
   }
   const carved = project.shapes.filter((s) => s.cut)
-  const rs = cutSettings.rough
-  const roughBit = effectiveBit(project, 'rough')
-  const r = roughBit.diameter / 2
-  const detailBit = bits.detail ? effectiveBit(project, 'detail') : null
-  const ds = cutSettings.detail
-  const usableDetail = detailBit && ds && detailBit.type !== 'vbit' && detailBit.diameter < 2 * r
-  const vRole: BitRole | null = detailBit?.type === 'vbit' ? 'detail' : roughBit.type === 'vbit' ? 'rough' : null
+  const roles = configuredBitRoles(project)
+  const tools = roles.map((role) => ({ role, bit: effectiveBit(project, role), settings: cutSettings[role]! }))
+  const toolByRole = new Map(tools.map((tool) => [tool.role, tool]))
+  const machiningRoles = machiningBitRoles(project)
+  const machiningTools = machiningRoles.map((role) => toolByRole.get(role)!)
+  const flatTools = machiningTools.filter((tool) => tool.bit.type !== 'vbit')
+  const automaticPocketTools = flatTools.length ? flatTools : machiningTools
+  const automaticOutlineTool = automaticPocketTools[0] ?? tools[0]
+  const vTool = [...tools].reverse().find((tool) => tool.bit.type === 'vbit') ?? null
   const pockets = carved
     .filter((s) => s.cut!.type === 'pocket')
     .map((shape) => ({ shape, region: shapeRegion(shape), depth: Math.min(shape.cut!.depth, t) }))
     .filter((p) => p.region.length)
   const pocketRegions = new Map(pockets.map((p) => [p.shape.id, p.region]))
-  const roughPockets = pockets.filter((p) => p.shape.cut!.bit !== 'detail')
-  const pocketRests = new Map(roughPockets.map((p) => [p.shape.id, opening(boolean(ClipType.Difference, p.region, opening(p.region, r)), SLIVER)]))
-  const dr = detailBit && ds ? detailBit.diameter / 2 : 0
-  const directDetailPockets = detailBit && ds ? pockets.filter((p) => p.shape.cut!.bit === 'detail' && inflate(p.region, -dr).length) : []
-  const autoDetailPockets = usableDetail
-    ? pockets
-        .filter((p) => p.shape.cut!.bit === 'auto')
-        .map((p) => ({ ...p, region: boolean(ClipType.Intersection, p.region, inflate(pocketRests.get(p.shape.id)!, 2 * dr)) }))
-        .filter((p) => inflate(p.region, -dr).length)
-    : []
-  const directDetails = new Map(directDetailPockets.map((p) => [p.shape.id, p]))
-  const autoDetails = new Map(autoDetailPockets.map((p) => [p.shape.id, p]))
-  const detailPockets = pockets.flatMap((p) => directDetails.get(p.shape.id) ?? autoDetails.get(p.shape.id) ?? [])
-  const detailedPocketIds = new Set(detailPockets.map((p) => p.shape.id))
-  const pocketGroups = (jobs: typeof pockets) => {
-    const groups = new Map<string, { jobs: typeof pockets; pattern: Cut['pocketPattern']; angle: number }>()
+  const precutPockets = pockets.filter((p) => p.shape.cut!.pocketPrecut && p.shape.cut!.bit === 'auto')
+  const edgeTool = flatTools.length > 1 && flatTools[0].bit.diameter > flatTools.at(-1)!.bit.diameter + 1e-9 ? flatTools.at(-1)! : null
+  type PocketJob = (typeof pockets)[number] & { full: boolean }
+  const pocketJobs = new Map<BitRole, PocketJob[]>()
+  const addPocket = (role: BitRole, job: PocketJob) => pocketJobs.set(role, [...(pocketJobs.get(role) ?? []), job])
+  for (const pocket of pockets) {
+    const selected = pocket.shape.cut!.bit === 'auto' ? automaticPocketTools : [toolByRole.get(pocket.shape.cut!.bit)!].filter(Boolean)
+    let previousRadius: number | null = null
+    selected.forEach((tool) => {
+      const radius = tool.bit.diameter / 2
+      if (previousRadius !== null && radius >= previousRadius - 1e-9) return
+      let region = pocket.region
+      const full = previousRadius === null || pocket.shape.cut!.bit !== 'auto'
+      if (!full) {
+        const rest = opening(boolean(ClipType.Difference, pocket.region, opening(pocket.region, previousRadius!)), SLIVER)
+        region = boolean(ClipType.Intersection, pocket.region, inflate(rest, 2 * radius))
+      }
+      if (inflate(region, -radius).length) {
+        addPocket(tool.role, { ...pocket, region, full })
+        previousRadius = radius
+      }
+    })
+  }
+  const pocketGroups = (jobs: PocketJob[]) => {
+    const groups = new Map<string, { jobs: PocketJob[]; pattern: Cut['pocketPattern']; angle: number }>()
     for (const job of jobs) {
       const pattern = job.shape.cut!.pocketPattern
-      const angle = pattern === 'raster' ? job.shape.cut!.pocketAngle : 0
+      const angle = pattern === 'raster' || pattern === 'crosshatch' || pattern === 'radial' ? job.shape.cut!.pocketAngle : 0
       const key = `${pattern}:${angle.toFixed(6)}`
       const group = groups.get(key) ?? { jobs: [], pattern, angle }
       group.jobs.push(job)
@@ -506,13 +608,18 @@ export function planProject(project: Project): CamResult {
     return [...groups.values()]
   }
   let pocketsPlanned = false
+  if (edgeTool && precutPockets.length) {
+    const segments = pocketEdgeSegments(precutPockets, edgeTool.bit.diameter / 2, edgeTool.settings)
+    if (segments.length) ops.push({ role: edgeTool.role, shapeId: precutPockets[0].shape.id, shapeIds: precutPockets.map((p) => p.shape.id), kind: 'pocket-edge', segments })
+  }
 
   for (const shape of carved) {
     const cut = shape.cut!
-    const selectedVRole = cut.bit === 'auto' ? vRole : cut.bit
-    const selectedVBit = selectedVRole === 'detail' ? detailBit : selectedVRole === 'rough' ? roughBit : null
-    if (cut.bit === 'detail' && (!detailBit || !ds)) {
-      warnings.push(`${shape.name} needs a detail bit`)
+    const selectedTool = cut.bit === 'auto' ? vTool : toolByRole.get(cut.bit) ?? null
+    const selectedVRole = selectedTool?.role ?? null
+    const selectedVBit = selectedTool?.bit ?? null
+    if (cut.bit !== 'auto' && !selectedTool) {
+      warnings.push(`${shape.name} needs its selected bit`)
       continue
     }
     if (cut.type === 'vcarve' && (!selectedVRole || selectedVBit?.type !== 'vbit')) {
@@ -533,6 +640,9 @@ export function planProject(project: Project): CamResult {
     const push = (list: Op[], role: BitRole, kind: Op['kind'], segments: Segment[], tabs: Tab[] = [], shapeIds: string[] = [shape.id]) =>
       segments.length && list.push({ role, shapeId: shapeIds[0], ...(shapeIds.length > 1 && { shapeIds }), kind, segments, ...(tabs.length && { tabs }) })
 
+    if (cut.type === 'pocket' && cut.pocketPrecut && (cut.bit !== 'auto' || !edgeTool))
+      warnings.push(`Edge pre-cut for ${shape.name} needs Automatic bit usage and two different-sized non-V bits`)
+
     if (cut.type === 'vcarve') {
       const vs = cutSettings[selectedVRole!]!
       const vBit = selectedVBit!
@@ -549,15 +659,15 @@ export function planProject(project: Project): CamResult {
         // (corners, necks). V-bit rings (radius f + 0.4·tan(α/2), stepover ½): for a sharp tip, ridges of about 0.2 mm,
         // up to ~0.35 mm at corners; a flat tip only makes them lower.
         const vRings = (area: PathsD) => pocketSegments(area, f + 2 * 0.2 * k, { ...vs, stepover: MAX_STEPOVER }, dmax)
-        const oRole: BitRole = selectedVRole === 'rough' ? 'detail' : 'rough'
-        const oBit = cut.bit === 'auto' && bits[oRole] ? effectiveBit(project, oRole) : null
-        const or = oBit && oBit.type !== 'vbit' && cutSettings[oRole] ? oBit.diameter / 2 : 0
+        const clearingTool = cut.bit === 'auto' ? flatTools.find((tool) => inflate(floor, -tool.bit.diameter / 2).length) ?? null : null
+        const oRole = clearingTool?.role
+        const or = clearingTool ? clearingTool.bit.diameter / 2 : 0
         if (or && inflate(floor, -or).length) {
-          push(ops, oRole, 'vcarve-clear', pocketSegments(floor, or, cutSettings[oRole]!, dmax))
+          push(ops, oRole!, 'vcarve-clear', pocketSegments(floor, or, clearingTool!.settings, dmax))
           const rest = opening(boolean(ClipType.Difference, floor, opening(floor, or)), SLIVER)
           if (rest.length) push(ops, selectedVRole!, 'vcarve-clear', vRings(boolean(ClipType.Intersection, floor, inflate(rest, 2 * (f + 0.4 * k)))))
         } else {
-          if (cut.bit === 'auto') warnings.push(or ? `The endmill is too large for the floor of ${shape.name}; the V-bit clears it` : 'Add a flat endmill for a smoother V-carve floor')
+          if (cut.bit === 'auto') warnings.push(flatTools.length ? `The endmill is too large for the floor of ${shape.name}; the V-bit clears it` : 'Add a flat endmill for a smoother V-carve floor')
           push(ops, selectedVRole!, 'vcarve-clear', vRings(floor))
         }
       }
@@ -569,9 +679,8 @@ export function planProject(project: Project): CamResult {
     }
 
     if (cut.type === 'outline') {
-      const role: BitRole = cut.bit === 'detail' ? 'detail' : 'rough'
-      const roleBit = role === 'detail' ? detailBit! : roughBit
-      const settings = cutSettings[role]!
+      const outlineTool = cut.bit === 'auto' ? automaticOutlineTool : toolByRole.get(cut.bit)!
+      const { role, bit: roleBit, settings } = outlineTool
       const radius = roleBit.diameter / 2
       const paths = outlinePaths(region, cut.side, radius)
       const inside = cut.side === 'inside'
@@ -603,42 +712,37 @@ export function planProject(project: Project): CamResult {
         }
       }
       const holdBack = cut.side !== 'inside' && cut.depth >= t
-      if (role === 'rough' && holdBack && tabZ === null) freed = true
+      if (holdBack && tabZ === null) freedRoles.add(role)
       push(holdBack ? last : ops, role, 'outline', L.finish(), tabs)
       continue
     }
 
     if (!pocketsPlanned) {
       pocketsPlanned = true
-      for (const group of pocketGroups(roughPockets))
-        push(ops, 'rough', 'pocket', layeredPocketSegments(group.jobs, r, rs, group.pattern, group.angle), [], group.jobs.map((p) => p.shape.id))
-      if (detailBit && ds) {
-        for (const group of pocketGroups(detailPockets)) {
-          const kind = group.jobs.some((p) => p.shape.cut!.bit === 'detail') ? 'pocket' : 'pocket-detail'
-          push(ops, 'detail', kind, layeredPocketSegments(group.jobs, dr, ds, group.pattern, group.angle), [], group.jobs.map((p) => p.shape.id))
+      const pocketRoleOrder = [...automaticPocketTools.map((tool) => tool.role), ...roles.filter((role) => !automaticPocketTools.some((tool) => tool.role === role))]
+      for (const role of pocketRoleOrder) {
+        const tool = toolByRole.get(role)!
+        for (const group of pocketGroups(pocketJobs.get(role) ?? [])) {
+          const kind = group.jobs.some((p) => p.full) ? 'pocket' : 'pocket-detail'
+          push(ops, role, kind, layeredPocketSegments(group.jobs, tool.bit.diameter / 2, tool.settings, group.pattern, group.angle), [], group.jobs.map((p) => p.shape.id))
         }
       }
     }
-    // Rest machining: what the rough bit's radius couldn't reach, widened so the detail bit can get in, clipped to the pocket.
-    const selectedRadius = cut.bit === 'detail' ? dr : r
+    const chain = cut.bit === 'auto' ? automaticPocketTools : [toolByRole.get(cut.bit)!]
+    const selectedRadius = Math.min(...chain.map((tool) => tool.bit.diameter / 2))
     const fits = !!inflate(region, -selectedRadius).length
-    if (cut.bit === 'auto' && !usableDetail) {
-      const rest = pocketRests.get(shape.id) ?? opening(boolean(ClipType.Difference, region, opening(region, r)), SLIVER)
-      if (detailBit && detailBit.type !== 'vbit') warnings.push('The detail bit must be smaller than the rough bit')
-      // ponytail: round inside corners always leave a little rest (about 0.17 r deep), so only leftovers wider than
-      // about 0.5 r are flagged; narrower slivers go unmentioned. Measure the rest's depth if that proves too lax.
-      if (fits && inflate(rest, -0.25 * r).length) warnings.push(`The rough bit can't reach all of ${shape.name}; add a smaller detail bit`)
-    } else if (cut.bit === 'rough') {
-      const rest = pocketRests.get(shape.id) ?? opening(boolean(ClipType.Difference, region, opening(region, r)), SLIVER)
-      if (fits && inflate(rest, -0.25 * r).length) warnings.push(`The rough bit can't reach all of ${shape.name}`)
-    } else if (cut.bit === 'detail') {
-      const rest = opening(boolean(ClipType.Difference, region, opening(region, dr)), SLIVER)
-      if (fits && inflate(rest, -0.25 * dr).length) warnings.push(`The detail bit can't reach all of ${shape.name}`)
-    }
-    if (region.length && !fits && !detailedPocketIds.has(shape.id)) warnings.push(tooLarge) // one warning per cause: not also "can't reach"
+    const rest = opening(boolean(ClipType.Difference, region, opening(region, selectedRadius)), SLIVER)
+    // ponytail: leftovers under about half a radius are treated as harmless corner slivers.
+    if (fits && inflate(rest, -0.25 * selectedRadius).length) warnings.push(`The smallest selected bit can't reach all of ${shape.name}`)
+    const planned = [...pocketJobs.values()].some((jobs) => jobs.some((job) => job.shape.id === shape.id))
+    if (region.length && !fits && !planned) warnings.push(tooLarge)
   }
   ops.push(...last)
-  if (freed && ops.some((o) => o.role === 'detail')) warnings.push('Parts are cut free before the detail pass; keep tabs on')
+  const edgeRoles = [...new Set(ops.filter((op) => op.kind === 'pocket-edge').map((op) => op.role))]
+  const runRoles = [...edgeRoles, ...machiningRoles.filter((role) => !edgeRoles.includes(role))]
+  ops.splice(0, ops.length, ...runRoles.flatMap((role) => ops.filter((op) => op.role === role)))
+  const lastUsedRole = Math.max(...ops.map((op) => runRoles.indexOf(op.role)), -1)
+  if ([...freedRoles].some((role) => runRoles.indexOf(role) < lastUsedRole)) warnings.push('Parts are cut free before later bit passes; keep tabs on')
 
   const time = (role: BitRole) => {
     const s = cutSettings[role]
@@ -648,5 +752,5 @@ export function planProject(project: Project): CamResult {
     mine.forEach((o, i) => (o.timeSec = secs[i]))
     return secs.reduce((a, b) => a + b, 0)
   }
-  return { ops, warnings: [...new Set(warnings)], timeSec: { rough: time('rough'), detail: time('detail') } }
+  return { ops, warnings: [...new Set(warnings)], timeSec: Object.fromEntries(roles.map((role) => [role, time(role)])) }
 }
