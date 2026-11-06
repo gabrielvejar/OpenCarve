@@ -430,21 +430,32 @@ export function planProject(project: Project): CamResult {
     .map((shape) => ({ shape, region: shapeRegion(shape), depth: Math.min(shape.cut!.depth, t) }))
     .filter((p) => p.region.length)
   const pocketRegions = new Map(pockets.map((p) => [p.shape.id, p.region]))
-  const pocketRests = new Map(pockets.map((p) => [p.shape.id, opening(boolean(ClipType.Difference, p.region, opening(p.region, r)), SLIVER)]))
-  const dr = usableDetail ? detailBit.diameter / 2 : 0
-  const detailPockets = usableDetail
+  const roughPockets = pockets.filter((p) => p.shape.cut!.bit !== 'detail')
+  const pocketRests = new Map(roughPockets.map((p) => [p.shape.id, opening(boolean(ClipType.Difference, p.region, opening(p.region, r)), SLIVER)]))
+  const dr = detailBit && ds ? detailBit.diameter / 2 : 0
+  const directDetailPockets = detailBit && ds ? pockets.filter((p) => p.shape.cut!.bit === 'detail' && inflate(p.region, -dr).length) : []
+  const autoDetailPockets = usableDetail
     ? pockets
+        .filter((p) => p.shape.cut!.bit === 'auto')
         .map((p) => ({ ...p, region: boolean(ClipType.Intersection, p.region, inflate(pocketRests.get(p.shape.id)!, 2 * dr)) }))
         .filter((p) => inflate(p.region, -dr).length)
     : []
+  const directDetails = new Map(directDetailPockets.map((p) => [p.shape.id, p]))
+  const autoDetails = new Map(autoDetailPockets.map((p) => [p.shape.id, p]))
+  const detailPockets = pockets.flatMap((p) => directDetails.get(p.shape.id) ?? autoDetails.get(p.shape.id) ?? [])
   const detailedPocketIds = new Set(detailPockets.map((p) => p.shape.id))
   let pocketsPlanned = false
-  let detailPocketsPlanned = false
 
   for (const shape of carved) {
     const cut = shape.cut!
-    if (cut.type === 'vcarve' && !vRole) {
-      warnings.push('V-carve needs a V-bit')
+    const selectedVRole = cut.bit === 'auto' ? vRole : cut.bit
+    const selectedVBit = selectedVRole === 'detail' ? detailBit : selectedVRole === 'rough' ? roughBit : null
+    if (cut.bit === 'detail' && (!detailBit || !ds)) {
+      warnings.push(`${shape.name} needs a detail bit`)
+      continue
+    }
+    if (cut.type === 'vcarve' && (!selectedVRole || selectedVBit?.type !== 'vbit')) {
+      warnings.push(cut.bit === 'auto' ? 'V-carve needs a V-bit' : `${shape.name} needs a V-bit as the ${cut.bit} bit`)
       continue
     }
     if (cut.type !== 'vcarve' && cut.depth > t + 1e-9) warnings.push(`${shape.name} is deeper than the stock`)
@@ -462,8 +473,8 @@ export function planProject(project: Project): CamResult {
       segments.length && list.push({ role, shapeId: shapeIds[0], ...(shapeIds.length > 1 && { shapeIds }), kind, segments, ...(tabs.length && { tabs }) })
 
     if (cut.type === 'vcarve') {
-      const vs = cutSettings[vRole!]!
-      const vBit = effectiveBit(project, vRole!)
+      const vs = cutSettings[selectedVRole!]!
+      const vBit = selectedVBit!
       const k = Math.tan((vBit.angle! * Math.PI) / 360)
       const f = (vBit.flat ?? 0) / 2 // Bit.flat is a diameter
       const coneDepth = vbitMaxDepth(vBit) // the UI clamps to this; files and bit edits can still exceed it
@@ -477,36 +488,40 @@ export function planProject(project: Project): CamResult {
         // (corners, necks). V-bit rings (radius f + 0.4·tan(α/2), stepover ½): for a sharp tip, ridges of about 0.2 mm,
         // up to ~0.35 mm at corners; a flat tip only makes them lower.
         const vRings = (area: PathsD) => pocketSegments(area, f + 2 * 0.2 * k, { ...vs, stepover: MAX_STEPOVER }, dmax)
-        const oRole: BitRole = vRole === 'rough' ? 'detail' : 'rough'
-        const oBit = bits[oRole] ? effectiveBit(project, oRole) : null
+        const oRole: BitRole = selectedVRole === 'rough' ? 'detail' : 'rough'
+        const oBit = cut.bit === 'auto' && bits[oRole] ? effectiveBit(project, oRole) : null
         const or = oBit && oBit.type !== 'vbit' && cutSettings[oRole] ? oBit.diameter / 2 : 0
         if (or && inflate(floor, -or).length) {
           push(ops, oRole, 'vcarve-clear', pocketSegments(floor, or, cutSettings[oRole]!, dmax))
           const rest = opening(boolean(ClipType.Difference, floor, opening(floor, or)), SLIVER)
-          if (rest.length) push(ops, vRole!, 'vcarve-clear', vRings(boolean(ClipType.Intersection, floor, inflate(rest, 2 * (f + 0.4 * k)))))
+          if (rest.length) push(ops, selectedVRole!, 'vcarve-clear', vRings(boolean(ClipType.Intersection, floor, inflate(rest, 2 * (f + 0.4 * k)))))
         } else {
-          warnings.push(or ? `The endmill is too large for the floor of ${shape.name}; the V-bit clears it` : 'Add a flat endmill for a smoother V-carve floor')
-          push(ops, vRole!, 'vcarve-clear', vRings(floor))
+          if (cut.bit === 'auto') warnings.push(or ? `The endmill is too large for the floor of ${shape.name}; the V-bit clears it` : 'Add a flat endmill for a smoother V-carve floor')
+          push(ops, selectedVRole!, 'vcarve-clear', vRings(floor))
         }
       }
       const { chains, spacing } = medialAxis(region)
       if (spacing > SPACING) warnings.push(`${shape.name} is very large; its V-carve is less detailed`)
       if (narrowerThanFlat(chains, f)) warnings.push(`Some details of ${shape.name} are narrower than the V-bit's flat tip`)
-      push(ops, vRole!, 'vcarve', vcarveSegments(region, chains, k, f, dmax, vs))
+      push(ops, selectedVRole!, 'vcarve', vcarveSegments(region, chains, k, f, dmax, vs))
       continue
     }
 
     if (cut.type === 'outline') {
-      const paths = outlinePaths(region, cut.side, r)
+      const role: BitRole = cut.bit === 'detail' ? 'detail' : 'rough'
+      const roleBit = role === 'detail' ? detailBit! : roughBit
+      const settings = cutSettings[role]!
+      const radius = roleBit.diameter / 2
+      const paths = outlinePaths(region, cut.side, radius)
       const inside = cut.side === 'inside'
       if (inside && region.length && !paths.length) warnings.push(tooLarge)
       else if (inside && paths.length < region.length) warnings.push(`Bit too large for parts of ${shape.name}`)
       const tabZ = tabsActive(cut, t) ? -(t - cut.tabHeight) : null
-      const zs = zLevels(depth, rs.stepdown)
-      const loops = paths.map((path) => closedPts(orient(path, areaD(path) > 0 !== inside, rs.direction)))
+      const zs = zLevels(depth, settings.stepdown)
+      const loops = paths.map((path) => closedPts(orient(path, areaD(path) > 0 !== inside, settings.direction)))
       const longest = Math.max(...loops.map((l) => arcLengths(l).at(-1)!))
       const tabs: Tab[] = []
-      const L = linker(rs.safeZ)
+      const L = linker(settings.safeZ)
       loops.forEach((pts, k) => {
         const lt = tabZ === null ? null : loopTabs(pts, cut.tabCount, longest, cut.tabWidth)
         if (lt && !lt.centres.length)
@@ -527,31 +542,34 @@ export function planProject(project: Project): CamResult {
         }
       }
       const holdBack = cut.side !== 'inside' && cut.depth >= t
-      if (holdBack && tabZ === null) freed = true
-      push(holdBack ? last : ops, 'rough', 'outline', L.finish(), tabs)
+      if (role === 'rough' && holdBack && tabZ === null) freed = true
+      push(holdBack ? last : ops, role, 'outline', L.finish(), tabs)
       continue
     }
 
     if (!pocketsPlanned) {
       pocketsPlanned = true
-      push(ops, 'rough', 'pocket', layeredPocketSegments(pockets, r, rs), [], pockets.map((p) => p.shape.id))
+      push(ops, 'rough', 'pocket', layeredPocketSegments(roughPockets, r, rs), [], roughPockets.map((p) => p.shape.id))
+      if (detailBit && ds)
+        push(ops, 'detail', directDetailPockets.length ? 'pocket' : 'pocket-detail', layeredPocketSegments(detailPockets, dr, ds), [], detailPockets.map((p) => p.shape.id))
     }
     // Rest machining: what the rough bit's radius couldn't reach, widened so the detail bit can get in, clipped to the pocket.
-    const rest = pocketRests.get(shape.id) ?? opening(boolean(ClipType.Difference, region, opening(region, r)), SLIVER)
-    const detailed = detailedPocketIds.has(shape.id)
-    const fits = !!inflate(region, -r).length
-    if (usableDetail) {
-      if (!detailPocketsPlanned) {
-        detailPocketsPlanned = true
-        push(ops, 'detail', 'pocket-detail', layeredPocketSegments(detailPockets, dr, ds), [], detailPockets.map((p) => p.shape.id))
-      }
-    } else {
+    const selectedRadius = cut.bit === 'detail' ? dr : r
+    const fits = !!inflate(region, -selectedRadius).length
+    if (cut.bit === 'auto' && !usableDetail) {
+      const rest = pocketRests.get(shape.id) ?? opening(boolean(ClipType.Difference, region, opening(region, r)), SLIVER)
       if (detailBit && detailBit.type !== 'vbit') warnings.push('The detail bit must be smaller than the rough bit')
       // ponytail: round inside corners always leave a little rest (about 0.17 r deep), so only leftovers wider than
       // about 0.5 r are flagged; narrower slivers go unmentioned. Measure the rest's depth if that proves too lax.
       if (fits && inflate(rest, -0.25 * r).length) warnings.push(`The rough bit can't reach all of ${shape.name}; add a smaller detail bit`)
+    } else if (cut.bit === 'rough') {
+      const rest = pocketRests.get(shape.id) ?? opening(boolean(ClipType.Difference, region, opening(region, r)), SLIVER)
+      if (fits && inflate(rest, -0.25 * r).length) warnings.push(`The rough bit can't reach all of ${shape.name}`)
+    } else if (cut.bit === 'detail') {
+      const rest = opening(boolean(ClipType.Difference, region, opening(region, dr)), SLIVER)
+      if (fits && inflate(rest, -0.25 * dr).length) warnings.push(`The detail bit can't reach all of ${shape.name}`)
     }
-    if (region.length && !fits && !detailed) warnings.push(tooLarge) // one warning per cause: not also "can't reach"
+    if (region.length && !fits && !detailedPocketIds.has(shape.id)) warnings.push(tooLarge) // one warning per cause: not also "can't reach"
   }
   ops.push(...last)
   if (freed && ops.some((o) => o.role === 'detail')) warnings.push('Parts are cut free before the detail pass; keep tabs on')

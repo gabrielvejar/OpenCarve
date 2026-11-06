@@ -5,8 +5,8 @@ import { BITS, differingFields, findBit, findMaterial, MATERIALS, overrideError 
 // A self-contained, versioned document: the same JSON is the download format and the IndexedDB record,
 // so a sync backend can store it verbatim later.
 export const FILE_FORMAT = 'opencarve'
-// Version 2 is the first public format; older versions will get migrations here (see AGENTS.md).
-export const FILE_VERSION = 2
+// Version 2 is the first public format; version 3 adds each cut's bit choice. Older versions migrate below.
+export const FILE_VERSION = 3
 
 export type EmbeddedFonts = Record<string, Omit<StoredFont, 'id'>>
 
@@ -69,6 +69,7 @@ function cut(v: unknown, what: string): Cut {
   const o = obj(v, what)
   return {
     type: oneOf(o, 'type', what, ['outline', 'pocket', 'vcarve'] as const),
+    bit: oneOf(o, 'bit', what, ['auto', 'rough', 'detail'] as const),
     side: oneOf(o, 'side', what, ['outside', 'inside', 'on'] as const),
     depth: num(o, 'depth', what),
     tabs: bool(o, 'tabs', what),
@@ -249,8 +250,17 @@ export async function parseProjectFile(
 }
 
 function projectFromData(data: unknown, warnings: string[]): Project {
-  const file = obj(data, 'file')
+  let file = obj(data, 'file')
   if (file.format !== FILE_FORMAT) fail('not an OpenCarve project')
+  if (file.version === 2) {
+    const oldProject = obj(file.project, 'project')
+    const oldShapes = Array.isArray(oldProject.shapes) ? oldProject.shapes : fail('shapes must be an array')
+    const shapes = oldShapes.map((value: unknown) => {
+      if (!isObj(value) || value.cut === undefined) return value
+      return { ...value, cut: { ...obj(value.cut, 'cut'), bit: 'auto' } }
+    })
+    file = { ...file, version: FILE_VERSION, project: { ...oldProject, shapes } }
+  }
   if (file.version !== FILE_VERSION) fail(`unsupported version ${String(file.version)} (this app reads version ${FILE_VERSION})`)
   const p = obj(file.project, 'project')
   const defaultMaterial = newProject().materialId

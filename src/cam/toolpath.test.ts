@@ -184,6 +184,8 @@ describe('detail', () => {
     const points: Point[] = [[-10, -10], [10, -10], [10, 10], [1.25, 10], [1.25, 30], [-1.25, 30], [-1.25, 10], [-10, 10]]
     const keyhole: CompoundShape = { id: 'k', type: 'compound', name: 'Rect', x: 50, y: 50, rotation: 0, paths: [{ closed: true, points }], cut: { ...defaultCut(12), type: 'pocket', depth: 3 } }
     expect(planProject(project([keyhole])).warnings).toEqual(["The rough bit can't reach all of Rect; add a smaller detail bit"])
+    const detailOnly = { ...keyhole, cut: { ...keyhole.cut!, bit: 'detail' as const } }
+    expect(planProject(project([detailOnly], '1/8-endmill', '6mm-endmill')).warnings).toContain("The detail bit can't reach all of Rect")
     expect(planProject(project([pocket])).warnings).toEqual([])
     expect(planProject(project([pocket], '1mm-endmill', '6mm-endmill')).warnings).toContain('The detail bit must be smaller than the rough bit')
   })
@@ -265,6 +267,31 @@ describe('plan and gcode', () => {
     const extents = (levels: Record<string, number[]>) => Object.fromEntries(Object.entries(levels).map(([z, xs]) => [z, [Math.min(...xs), Math.max(...xs)]]))
 
     expect(extents(signature([...pockets].reverse()))).toEqual(extents(signature(pockets)))
+  })
+  it('honours the bit selected for each outline and pocket', () => {
+    const outline = { ...rect(20, 20), id: 'outline', cut: { ...defaultCut(12), bit: 'detail' as const } }
+    const pocket = { ...rect(30, 30), id: 'pocket', x: 100, cut: { ...defaultCut(12), type: 'pocket' as const, bit: 'rough' as const, depth: 2 } }
+    const p = project([outline, pocket], '6mm-endmill', '1mm-endmill')
+    const result = planProject(p)
+
+    expect(result.ops.map((o) => [o.shapeId, o.kind, o.role])).toEqual([
+      ['pocket', 'pocket', 'rough'],
+      ['outline', 'outline', 'detail'],
+    ])
+    expect(result.ops.some((o) => o.kind === 'pocket-detail')).toBe(false)
+    const outlineXs = result.ops.find((o) => o.shapeId === 'outline')!.segments.flatMap((s) => s.points.map((q) => q[0]))
+    expect(Math.max(...outlineXs) - Math.min(...outlineXs)).toBeCloseTo(21, 2)
+  })
+  it('can clear a whole pocket with only the detail bit', () => {
+    const pocket = { ...rect(30, 30), id: 'pocket', cut: { ...defaultCut(12), type: 'pocket' as const, bit: 'detail' as const, depth: 2 } }
+    const p = project([pocket], '6mm-endmill', '1mm-endmill')
+    const result = planProject(p)
+
+    expect(result.ops.map((o) => [o.kind, o.role])).toEqual([['pocket', 'detail']])
+    expect(result.ops[0].segments.filter((s) => s.plunge).map((s) => s.points[0][2])).toEqual(zLevels(2, p.cutSettings.detail!.stepdown))
+    const xs = result.ops[0].segments.filter((s) => !s.rapid).flatMap((s) => s.points.map((q) => q[0]))
+    expect(Math.max(...xs) - Math.min(...xs)).toBeCloseTo(29, 2)
+    expect(planProject(project([pocket], '6mm-endmill')).warnings).toEqual(['Rect needs a detail bit'])
   })
   it('uses the overridden bit diameter', () => {
     const width = (p: Project) => {
@@ -629,6 +656,14 @@ describe('tabs on every cut loop', () => {
 describe('v-carve', () => {
   const vcarve = (w: number, h: number, depth: number) => ({ ...rect(w, h), x: 100, y: 100, cut: { ...defaultCut(12), type: 'vcarve' as const, depth } })
   const cutPoints = (op: Op) => op.segments.filter((s) => !s.rapid).flatMap((s) => s.points)
+  it('uses only the selected V-bit role', () => {
+    const roughOnly = { ...vcarve(60, 20, 4), cut: { ...vcarve(60, 20, 4).cut, bit: 'rough' as const } }
+    expect(planProject(project([roughOnly], '60-vbit', '90-vbit')).ops.every((o) => o.role === 'rough')).toBe(true)
+    const wrongRole = { ...vcarve(60, 20, 4), cut: { ...vcarve(60, 20, 4).cut, bit: 'rough' as const } }
+    const result = planProject(project([wrongRole], '1/8-endmill', '90-vbit'))
+    expect(result.ops).toEqual([])
+    expect(result.warnings).toEqual(['Rect needs a V-bit as the rough bit'])
+  })
   it('60×20 rect, 90° V-bit, max depth 4, endmill clears the floor', () => {
     const shape = vcarve(60, 20, 4)
     const r = planProject(project([shape], '1/8-endmill', '90-vbit'))

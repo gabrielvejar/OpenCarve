@@ -200,6 +200,28 @@ test('sets a rectangle to a pocket cut', async ({ page }) => {
   await expect(depth).toHaveValue('3.00')
   await expect(page.getByRole('slider', { name: 'Depth' })).toHaveValue('3')
   await expect(page.getByLabel('Tabs')).toHaveCount(0)
+  await expect(page.getByRole('radio', { name: 'Automatic' })).toBeChecked()
+  await expect(page.getByRole('radio', { name: 'Detail only' })).toBeDisabled()
+})
+
+test('assigns a shape exclusively to the detail bit', async ({ page }) => {
+  await page.getByRole('button', { name: 'Rectangle' }).click()
+  const box = (await page.getByLabel('Design canvas').boundingBox())!
+  await page.mouse.move(box.x + box.width / 2 - 50, box.y + box.height / 2 - 30)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width / 2 + 50, box.y + box.height / 2 + 30, { steps: 4 })
+  await page.mouse.up()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByLabel('Detail bit').selectOption('1mm-endmill')
+  await page.getByRole('button', { name: 'Design', exact: true }).click()
+  await page.getByRole('radio', { name: 'Detail only' }).click()
+
+  await page.getByRole('button', { name: /^Simulate/ }).click()
+  await waitForCam(page)
+  await expect(page.locator('.op-list').getByRole('button')).toContainText('Detail bit')
+  await page.getByRole('button', { name: 'Export', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Download rough G-code' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Download detail G-code' })).toBeEnabled()
 })
 
 test('exports G-code for a rectangle', async ({ page }) => {

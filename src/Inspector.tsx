@@ -110,8 +110,10 @@ function CutSection({ selected }: { selected: Shape[] }) {
   const vbit = [bits.rough, bits.detail].some((id) => id && findBit(id).type === 'vbit')
   const type = shared((s) => s.cut?.type ?? 'none')
   const vcarve = type === 'vcarve'
-  const vBit = vcarveBit(project)
-  const maxDepth = vcarve ? Math.min(t - 0.5, vBit ? vbitMaxDepth(vBit) : Infinity) : t
+  const bitChoice = shared((s) => s.cut?.bit ?? '')
+  const roleBit = bitChoice === 'rough' || (bitChoice === 'detail' && bits.detail) ? effectiveBit(project, bitChoice) : null
+  const vBit = bitChoice === 'auto' || !bitChoice ? vcarveBit(project) : roleBit?.type === 'vbit' ? roleBit : null
+  const maxDepth = vcarve ? Math.min(t - 0.5, vBit ? vbitMaxDepth(vBit) : t - 0.5) : t
   const through = !vcarve && cuts.every((c) => c && c.depth >= t)
   const depth = cuts[0]?.depth ?? t
   const sameDepth = cuts.every((c) => c?.depth === depth)
@@ -139,8 +141,31 @@ function CutSection({ selected }: { selected: Shape[] }) {
           { value: 'none', label: 'None' },
         ]}
         hint={open ? 'Open paths can only be cut along the path.' : vbit ? undefined : 'V-carve needs a V-bit as the rough or detail bit.'}
-        onChange={(v) => setCut(v === 'none' ? null : { type: v, ...(v === 'pocket' && cuts.every((c) => !c || c.depth >= t) && { depth: Math.min(3, t / 2) }) })}
+        onChange={(v) =>
+          setCut(
+            v === 'none'
+              ? null
+              : {
+                  type: v,
+                  ...(v === 'vcarve' && bitChoice !== 'auto' && roleBit?.type !== 'vbit' && { bit: 'auto' }),
+                  ...(v === 'pocket' && cuts.every((c) => !c || c.depth >= t) && { depth: Math.min(3, t / 2) }),
+                },
+          )
+        }
       />
+      {carved && (
+        <Segmented
+          label="Bit usage"
+          value={bitChoice}
+          options={[
+            { value: 'auto', label: 'Automatic' },
+            { value: 'rough', label: 'Rough only', disabled: vcarve && findBit(bits.rough).type !== 'vbit' },
+            { value: 'detail', label: 'Detail only', disabled: !bits.detail || (vcarve && findBit(bits.detail).type !== 'vbit') },
+          ]}
+          hint="Automatic keeps the normal two-stage behaviour; choosing one bit generates this shape only in that bit's G-code."
+          onChange={(bit) => setCut({ bit })}
+        />
+      )}
       {type === 'outline' && (
         <Segmented
           label="Cut side"

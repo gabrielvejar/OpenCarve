@@ -122,6 +122,7 @@ export const MAX_STEPOVER = 0.5 // beyond this, successive pocket rings can leav
 // `tabs` is the user's choice; tabsActive() says whether it applies.
 export interface Cut {
   type: 'outline' | 'pocket' | 'vcarve'
+  bit: 'auto' | BitRole
   side: 'outside' | 'inside' | 'on'
   depth: number // mm from top; >= stock.thickness means through
   tabs: boolean
@@ -210,6 +211,7 @@ export const isOpen = (s: Shape) => (s.type === 'path' ? !s.closed : s.type === 
 
 export const defaultCut = (thickness: number): Cut => ({
   type: 'outline',
+  bit: 'auto',
   side: 'outside',
   depth: thickness,
   tabs: true,

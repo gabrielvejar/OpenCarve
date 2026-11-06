@@ -50,7 +50,7 @@ v1.2 step 15 is done.
 v1.2 step 16 is done.
 16. Settings step: Settings → Design → Simulate → Export; new projects open on Settings, reopened or opened files on Design. The project settings (Stock + Work zero, Machine, Bits, Material, cut settings, G-code) moved to a two-column Settings panel that takes over the 3D preview's area (the preview stays mounted, hidden); Design with nothing selected shows a summary with "Edit in Settings". Custom G-code blocks before/after the toolpaths (printable ASCII, ≤ 20 000 characters each), appended to the standard lines or replacing them, with a live preview of the rough file's first and last lines. `project.gcode` is required in project files. Format version 2 is the first public format.
 
-Since v1.2: snap to grid with a zoom-adaptive grid, font-picker previews, tabs kept off corners, and depth-aware merging of overlapping pocket toolpaths so shared material is cleared only once.
+Since v1.2: snap to grid with a zoom-adaptive grid, font-picker previews, tabs kept off corners, depth-aware merging of overlapping pocket toolpaths so shared material is cleared only once, and per-shape Automatic/Rough only/Detail only bit assignment. Project format v3 adds the bit assignment and migrates v2 cuts to Automatic.
 
 ### Known limitations
 - Text has no ligatures or complex-script shaping.
