@@ -31,6 +31,7 @@ export interface Segment {
 export interface Op {
   role: BitRole
   shapeId: string
+  shapeIds?: string[] // combined operations; shapeId stays as the primary id for file compatibility
   kind: 'outline' | 'pocket' | 'pocket-detail' | 'vcarve' | 'vcarve-clear'
   segments: Segment[]
   tabs?: Tab[]
@@ -38,7 +39,8 @@ export interface Op {
 }
 // A tab's middle on the tool-centre loop, the loop's direction there (radians from +X) and its raised length.
 export type Tab = { x: number; y: number; angle: number; width: number }
-export const opKey = (o: Op) => `${o.shapeId}:${o.kind}:${o.role}`
+export const opShapeIds = (o: Op) => o.shapeIds ?? [o.shapeId]
+export const opKey = (o: Op) => `${opShapeIds(o).join(',')}:${o.kind}:${o.role}`
 
 export interface CamResult {
   ops: Op[]
@@ -284,23 +286,43 @@ function linker(safeZ: number) {
 }
 
 function pocketSegments(region: PathsD, r: number, s: CutSettings, depth: number) {
-  const plan = islands(region)
+  const plan = pocketPlan(region, r, s)
+  const L = linker(s.safeZ)
+  for (const z of zLevels(depth, s.stepdown)) cutPocketLevel(plan, L, z)
+  return L.finish()
+}
+
+function pocketPlan(region: PathsD, r: number, s: CutSettings) {
+  return islands(region)
     .map((island) => {
       const rings = pocketRings(island, r, Math.min(MAX_STEPOVER, s.stepover) * 2 * r)
       return { wall: rings.at(-1) ?? [], rings: rings.map((level) => level.map((p) => closedPts(orient(p, areaD(p) < 0, s.direction)))) }
     })
     .filter((isl) => isl.rings.length)
-  const L = linker(s.safeZ)
+}
+
+function cutPocketLevel(plan: ReturnType<typeof pocketPlan>, L: ReturnType<typeof linker>, z: number) {
   let prev: (typeof plan)[number] | null = null
-  for (const z of zLevels(depth, s.stepdown)) {
-    for (const isl of plan) {
-      for (const ring of isl.rings.flat()) {
-        const c = L.cur
-        L.moveTo([...ring[0], z], prev === isl && !!c && safeLink([c[0], c[1]], ring[0], isl.wall))
-        L.cut(ring.slice(1).map((p): Pt3 => [...p, z]))
-        prev = isl
-      }
+  for (const isl of plan) {
+    for (const ring of isl.rings.flat()) {
+      const c = L.cur
+      L.moveTo([...ring[0], z], prev === isl && !!c && safeLink([c[0], c[1]], ring[0], isl.wall))
+      L.cut(ring.slice(1).map((p): Pt3 => [...p, z]))
+      prev = isl
     }
+  }
+}
+
+// Plans overlapping pockets as one depth field. At each Z level the active region is the union of every pocket
+// whose requested depth reaches that level, so shared material is cleared once instead of once per shape.
+function layeredPocketSegments(pockets: { region: PathsD; depth: number }[], r: number, s: CutSettings) {
+  const raw = pockets.flatMap((p) => zLevels(p.depth, s.stepdown).map((z) => -z)).sort((a, b) => a - b)
+  const levels = raw.filter((d, i) => !i || d - raw[i - 1] > 1e-9)
+  const L = linker(s.safeZ)
+  for (const depth of levels) {
+    const active = pockets.filter((p) => p.depth + 1e-9 >= depth).flatMap((p) => p.region)
+    const region = boolean(ClipType.Union, active, null)
+    cutPocketLevel(pocketPlan(region, r, s), L, -depth)
   }
   return L.finish()
 }
@@ -403,6 +425,21 @@ export function planProject(project: Project): CamResult {
   const ds = cutSettings.detail
   const usableDetail = detailBit && ds && detailBit.type !== 'vbit' && detailBit.diameter < 2 * r
   const vRole: BitRole | null = detailBit?.type === 'vbit' ? 'detail' : roughBit.type === 'vbit' ? 'rough' : null
+  const pockets = carved
+    .filter((s) => s.cut!.type === 'pocket')
+    .map((shape) => ({ shape, region: shapeRegion(shape), depth: Math.min(shape.cut!.depth, t) }))
+    .filter((p) => p.region.length)
+  const pocketRegions = new Map(pockets.map((p) => [p.shape.id, p.region]))
+  const pocketRests = new Map(pockets.map((p) => [p.shape.id, opening(boolean(ClipType.Difference, p.region, opening(p.region, r)), SLIVER)]))
+  const dr = usableDetail ? detailBit.diameter / 2 : 0
+  const detailPockets = usableDetail
+    ? pockets
+        .map((p) => ({ ...p, region: boolean(ClipType.Intersection, p.region, inflate(pocketRests.get(p.shape.id)!, 2 * dr)) }))
+        .filter((p) => inflate(p.region, -dr).length)
+    : []
+  const detailedPocketIds = new Set(detailPockets.map((p) => p.shape.id))
+  let pocketsPlanned = false
+  let detailPocketsPlanned = false
 
   for (const shape of carved) {
     const cut = shape.cut!
@@ -419,10 +456,10 @@ export function planProject(project: Project): CamResult {
     }
     const b = polylineBounds(polys)
     if (b.minX < 0 || b.minY < 0 || b.maxX > stock.w || b.maxY > stock.h) warnings.push(`${shape.name} is partly outside the stock`)
-    const region = shapeRegion(shape)
+    const region = pocketRegions.get(shape.id) ?? shapeRegion(shape)
     const tooLarge = `Bit too large for ${shape.name}`
-    const push = (list: Op[], role: BitRole, kind: Op['kind'], segments: Segment[], tabs: Tab[] = []) =>
-      segments.length && list.push({ role, shapeId: shape.id, kind, segments, ...(tabs.length && { tabs }) })
+    const push = (list: Op[], role: BitRole, kind: Op['kind'], segments: Segment[], tabs: Tab[] = [], shapeIds: string[] = [shape.id]) =>
+      segments.length && list.push({ role, shapeId: shapeIds[0], ...(shapeIds.length > 1 && { shapeIds }), kind, segments, ...(tabs.length && { tabs }) })
 
     if (cut.type === 'vcarve') {
       const vs = cutSettings[vRole!]!
@@ -495,14 +532,19 @@ export function planProject(project: Project): CamResult {
       continue
     }
 
-    push(ops, 'rough', 'pocket', pocketSegments(region, r, rs, depth))
+    if (!pocketsPlanned) {
+      pocketsPlanned = true
+      push(ops, 'rough', 'pocket', layeredPocketSegments(pockets, r, rs), [], pockets.map((p) => p.shape.id))
+    }
     // Rest machining: what the rough bit's radius couldn't reach, widened so the detail bit can get in, clipped to the pocket.
-    const rest = opening(boolean(ClipType.Difference, region, opening(region, r)), SLIVER)
-    let detailed = false
+    const rest = pocketRests.get(shape.id) ?? opening(boolean(ClipType.Difference, region, opening(region, r)), SLIVER)
+    const detailed = detailedPocketIds.has(shape.id)
     const fits = !!inflate(region, -r).length
     if (usableDetail) {
-      const dr = detailBit.diameter / 2
-      if (rest.length) detailed = !!push(ops, 'detail', 'pocket-detail', pocketSegments(boolean(ClipType.Intersection, region, inflate(rest, 2 * dr)), dr, ds, depth))
+      if (!detailPocketsPlanned) {
+        detailPocketsPlanned = true
+        push(ops, 'detail', 'pocket-detail', layeredPocketSegments(detailPockets, dr, ds), [], detailPockets.map((p) => p.shape.id))
+      }
     } else {
       if (detailBit && detailBit.type !== 'vbit') warnings.push('The detail bit must be smaller than the rough bit')
       // ponytail: round inside corners always leave a little rest (about 0.17 r deep), so only leftovers wider than

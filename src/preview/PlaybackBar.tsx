@@ -1,4 +1,4 @@
-import type { Op } from '../cam/toolpath'
+import { opShapeIds, type Op } from '../cam/toolpath'
 import { effectiveBit } from '../lib/library'
 import { mmss } from '../SimulatePanel'
 import { useAppStore } from '../store'
@@ -16,6 +16,7 @@ export default function PlaybackBar({ tl, ops }: { tl: Timeline; ops: Op[] }) {
   const t = Math.min(anim.t, tl.total)
   const move = tl.moves[moveAt(tl, t)]
   const op = ops[move.op]
+  const opNames = op ? opShapeIds(op).flatMap((id) => shapes.find((s) => s.id === id)?.name ?? []).join(' + ') : ''
   const toggle = () => setAnim(anim.playing ? { playing: false } : { playing: true, ...(t >= tl.total && { t: 0 }) })
 
   return (
@@ -67,7 +68,7 @@ export default function PlaybackBar({ tl, ops }: { tl: Timeline; ops: Op[] }) {
           Material removal
         </label>
         <span className="playback-op" aria-live="off">
-          {shapes.find((s) => s.id === op?.shapeId)?.name ?? ''}
+          {opNames}
           {bits[move.role] && ` · ${effectiveBit({ bits, bitOverrides }, move.role).name}`}
         </span>
       </div>

@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { xyZeroLabel } from './cam/gcode'
-import { opKey, type Op } from './cam/toolpath'
+import { opKey, opShapeIds, type Op } from './cam/toolpath'
 import { icons } from './icons'
 import { effectiveBit, findMaterial } from './lib/library'
 import { formatLength } from './lib/units'
@@ -88,20 +88,22 @@ export default function SimulatePanel() {
       {cam?.ops.length ? (
         <ul className="op-list" aria-labelledby="toolpaths-heading">
           {cam.ops.map((op, i) => {
-            const shape = shapes.find((s) => s.id === op.shapeId)
+            const shapeIds = opShapeIds(op)
+            const opShapes = shapeIds.flatMap((id) => shapes.find((s) => s.id === id) ?? [])
+            const shape = opShapes[0]
             const key = opKey(op)
-            const active = highlight === key && selection.includes(op.shapeId)
+            const active = highlight === key && shapeIds.every((id) => selection.includes(id))
             return (
               <li key={key}>
                 <button
                   className="op-row"
                   aria-pressed={active}
                   onClick={() => {
-                    useAppStore.setState({ selection: [op.shapeId], highlightOp: active ? null : key })
+                    useAppStore.setState({ selection: shapeIds, highlightOp: active ? null : key })
                     seek(i)
                   }}
                 >
-                  <span className="op-name">{shape?.name}</span>
+                  <span className="op-name">{opShapes.map((s) => s.name).join(' + ')}</span>
                   <span className="op-time">{mmss(op.timeSec ?? 0)}</span>
                   <span className="op-kind">
                     {op.kind === 'outline' ? SIDE_LABEL[shape?.cut?.side ?? 'on'] : KIND_LABEL[op.kind]} · {ROLE_LABEL[op.role]} bit

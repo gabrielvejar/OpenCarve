@@ -1,5 +1,5 @@
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
-import { opKey, type Op, type Pt3 } from '../cam/toolpath'
+import { opKey, opShapeIds, type Op, type Pt3 } from '../cam/toolpath'
 import { icons } from '../icons'
 import { FONTS, loadFont } from '../lib/fonts'
 import { dominantScale, fitText, gridPath, gridSteps, localBounds, polylineBounds, scaleShape, shapeBounds, shapeToPolylines, toLocal, toWorld, type Bounds } from '../lib/geometry'
@@ -161,7 +161,7 @@ export default function Canvas() {
   const camBusy = useAppStore((s) => s.camBusy)
   const highlight = useAppStore((s) => s.highlightOp)
   const [showRapids, setShowRapids] = useState(false)
-  const hl = cam?.ops.find((o) => opKey(o) === highlight && selection.includes(o.shapeId))
+  const hl = cam?.ops.find((o) => opKey(o) === highlight && opShapeIds(o).every((id) => selection.includes(id)))
   const toolpaths = cam && toolpathD(cam.ops.filter((o) => o !== hl))
   const hlPaths = hl && toolpathD([hl])
   const svgRef = useRef<SVGSVGElement>(null)
@@ -472,7 +472,7 @@ export default function Canvas() {
             const cls = selection.includes(s.id) ? 'selected' : hover === s.id ? 'hover' : ''
             const { cut } = s
             const current = planned?.shapes?.includes(s) && cut && tabsActive(cut, stock.thickness)
-            const tabs = current ? planned!.ops.filter((o) => o.shapeId === s.id).flatMap((o) => o.tabs ?? []) : []
+            const tabs = current ? planned!.ops.filter((o) => opShapeIds(o).includes(s.id)).flatMap((o) => o.tabs ?? []) : []
             return (
               <g key={s.id} data-id={s.id} data-cut={cut?.type ?? 'none'} data-side={cut?.type === 'outline' ? cut.side : undefined} className={`shape ${cls}`}>
                 <path className="hit" d={pathD(polys)} />

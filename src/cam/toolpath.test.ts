@@ -211,6 +211,61 @@ describe('plan and gcode', () => {
     expect(planProject(p).ops.map((o) => o.shapeId)).toEqual(['c', 'b', 'a'])
     expect(r.timeSec.rough).toBeGreaterThan(0)
   })
+  it('cuts overlapping pockets as one depth field instead of recutting cleared material', () => {
+    const pockets = [
+      { ...rect(60, 60), id: 'outer', name: 'Outer', cut: { ...defaultCut(12), type: 'pocket' as const, depth: 1 } },
+      { ...rect(50, 50), id: 'middle', name: 'Middle', cut: { ...defaultCut(12), type: 'pocket' as const, depth: 2 } },
+      { ...rect(40, 40), id: 'inner', name: 'Inner', cut: { ...defaultCut(12), type: 'pocket' as const, depth: 3 } },
+    ]
+    const p = project(pockets)
+    p.cutSettings.rough.stepdown = 1
+    const result = planProject(p)
+    const rough = result.ops.filter((o) => o.kind === 'pocket' && o.role === 'rough')
+
+    expect(rough).toHaveLength(1)
+    expect(rough[0].shapeIds).toEqual(['outer', 'middle', 'inner'])
+    expect(rough[0].segments.filter((s) => s.plunge).map((s) => s.points[0][2])).toEqual([-1, -2, -3])
+
+    const widths = [-1, -2, -3].map((z) => {
+      const xs = rough[0].segments.filter((s) => !s.rapid && !s.plunge).flatMap((s) => s.points.filter((q) => q[2] === z).map((q) => q[0]))
+      return Math.max(...xs) - Math.min(...xs)
+    })
+    expect(widths[0]).toBeCloseTo(60 - findBit('1/8-endmill').diameter, 2)
+    expect(widths[1]).toBeCloseTo(50 - findBit('1/8-endmill').diameter, 2)
+    expect(widths[2]).toBeCloseTo(40 - findBit('1/8-endmill').diameter, 2)
+
+    const gcode = toGcode(result, 'rough', p).split('\n')
+    for (const z of ['Z-1', 'Z-2', 'Z-3']) expect(gcode.filter((line) => line.split(/\s+/).includes(z))).toHaveLength(1)
+
+    const twoBit = project(pockets, '6mm-endmill', '1mm-endmill')
+    twoBit.cutSettings.rough.stepdown = 1
+    twoBit.cutSettings.detail!.stepdown = 1
+    const detail = planProject(twoBit).ops.filter((o) => o.kind === 'pocket-detail')
+    expect(detail).toHaveLength(1)
+    expect(detail[0].shapeIds).toEqual(['outer', 'middle', 'inner'])
+  })
+  it('plans the same overlapping-pocket geometry regardless of shape order', () => {
+    const pockets = [
+      { ...rect(60, 60), id: 'outer', cut: { ...defaultCut(12), type: 'pocket' as const, depth: 1 } },
+      { ...rect(50, 50), id: 'middle', cut: { ...defaultCut(12), type: 'pocket' as const, depth: 2 } },
+      { ...rect(40, 40), id: 'inner', cut: { ...defaultCut(12), type: 'pocket' as const, depth: 3 } },
+    ]
+    const signature = (shapes: Shape[]) => {
+      const p = project(shapes)
+      p.cutSettings.rough.stepdown = 1
+      return planProject(p).ops[0].segments
+        .filter((s) => !s.rapid && !s.plunge && s.points.length)
+        .reduce<Record<string, number[]>>((levels, s) => {
+          const z = String(s.points[0][2])
+          const xs = s.points.map((q) => q[0])
+          levels[z] = [...(levels[z] ?? []), ...xs]
+          return levels
+        }, {})
+    }
+    const extents = (levels: Record<string, number[]>) => Object.fromEntries(Object.entries(levels).map(([z, xs]) => [z, [Math.min(...xs), Math.max(...xs)]]))
+
+    expect(extents(signature([...pockets].reverse()))).toEqual(extents(signature(pockets)))
+  })
   it('uses the overridden bit diameter', () => {
     const width = (p: Project) => {
       const xs = planProject(p).ops.find((o) => o.shapeId === 'a')!.segments.flatMap((g) => g.points.filter((q) => q[2] < 0).map((q) => q[0]))
