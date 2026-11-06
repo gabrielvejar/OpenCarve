@@ -313,16 +313,65 @@ function cutPocketLevel(plan: ReturnType<typeof pocketPlan>, L: ReturnType<typeo
   }
 }
 
+const rotatePoint = (p: { x: number; y: number }, angle: number) => {
+  const [c, s] = [Math.cos(angle), Math.sin(angle)]
+  return { x: p.x * c - p.y * s, y: p.x * s + p.y * c }
+}
+
+function rasterPlan(region: PathsD, r: number, s: CutSettings, degrees: number) {
+  const angle = (degrees * Math.PI) / 180
+  const step = Math.min(MAX_STEPOVER, s.stepover) * 2 * r
+  return islands(inflate(region, -r)).map((island) => {
+    const rotated = island.map((path) => path.map((p) => rotatePoint(p, -angle)))
+    const ys = rotated.flat().map((p) => p.y)
+    const [minY, maxY] = [Math.min(...ys), Math.max(...ys)]
+    const count = Math.max(1, Math.ceil((maxY - minY) / step))
+    const spacing = (maxY - minY) / count
+    const paths: Point[][] = []
+    for (let row = 0; row < count; row++) {
+      const y = minY + (row + 0.5) * spacing
+      const xs: number[] = []
+      for (const path of rotated) {
+        for (let i = 0; i < path.length; i++) {
+          const [a, b] = [path[i], path[(i + 1) % path.length]]
+          if ((a.y <= y && b.y > y) || (b.y <= y && a.y > y)) xs.push(a.x + ((y - a.y) * (b.x - a.x)) / (b.y - a.y))
+        }
+      }
+      xs.sort((a, b) => a - b)
+      for (let i = 0; i + 1 < xs.length; i += 2) {
+        const line = [rotatePoint({ x: xs[i], y }, angle), rotatePoint({ x: xs[i + 1], y }, angle)].map((p): Point => [p.x, p.y])
+        paths.push((row + i / 2) % 2 ? line.reverse() : line)
+      }
+    }
+    // Finish on the exact tool-centre wall after the raster has cleared the interior.
+    paths.push(...island.map((p) => closedPts(orient(p, areaD(p) < 0, s.direction))))
+    return { wall: island, paths }
+  })
+}
+
+function cutRasterLevel(plan: ReturnType<typeof rasterPlan>, L: ReturnType<typeof linker>, z: number) {
+  for (const island of plan) {
+    let previous = false
+    for (const path of island.paths) {
+      const c = L.cur
+      L.moveTo([...path[0], z], previous && !!c && safeLink([c[0], c[1]], path[0], island.wall))
+      L.cut(path.slice(1).map((p): Pt3 => [...p, z]))
+      previous = true
+    }
+  }
+}
+
 // Plans overlapping pockets as one depth field. At each Z level the active region is the union of every pocket
 // whose requested depth reaches that level, so shared material is cleared once instead of once per shape.
-function layeredPocketSegments(pockets: { region: PathsD; depth: number }[], r: number, s: CutSettings) {
+function layeredPocketSegments(pockets: { region: PathsD; depth: number }[], r: number, s: CutSettings, pattern: Cut['pocketPattern'] = 'concentric', angle = 0) {
   const raw = pockets.flatMap((p) => zLevels(p.depth, s.stepdown).map((z) => -z)).sort((a, b) => a - b)
   const levels = raw.filter((d, i) => !i || d - raw[i - 1] > 1e-9)
   const L = linker(s.safeZ)
   for (const depth of levels) {
     const active = pockets.filter((p) => p.depth + 1e-9 >= depth).flatMap((p) => p.region)
     const region = boolean(ClipType.Union, active, null)
-    cutPocketLevel(pocketPlan(region, r, s), L, -depth)
+    if (pattern === 'raster') cutRasterLevel(rasterPlan(region, r, s, angle), L, -depth)
+    else cutPocketLevel(pocketPlan(region, r, s), L, -depth)
   }
   return L.finish()
 }
@@ -444,6 +493,18 @@ export function planProject(project: Project): CamResult {
   const autoDetails = new Map(autoDetailPockets.map((p) => [p.shape.id, p]))
   const detailPockets = pockets.flatMap((p) => directDetails.get(p.shape.id) ?? autoDetails.get(p.shape.id) ?? [])
   const detailedPocketIds = new Set(detailPockets.map((p) => p.shape.id))
+  const pocketGroups = (jobs: typeof pockets) => {
+    const groups = new Map<string, { jobs: typeof pockets; pattern: Cut['pocketPattern']; angle: number }>()
+    for (const job of jobs) {
+      const pattern = job.shape.cut!.pocketPattern
+      const angle = pattern === 'raster' ? job.shape.cut!.pocketAngle : 0
+      const key = `${pattern}:${angle.toFixed(6)}`
+      const group = groups.get(key) ?? { jobs: [], pattern, angle }
+      group.jobs.push(job)
+      groups.set(key, group)
+    }
+    return [...groups.values()]
+  }
   let pocketsPlanned = false
 
   for (const shape of carved) {
@@ -549,9 +610,14 @@ export function planProject(project: Project): CamResult {
 
     if (!pocketsPlanned) {
       pocketsPlanned = true
-      push(ops, 'rough', 'pocket', layeredPocketSegments(roughPockets, r, rs), [], roughPockets.map((p) => p.shape.id))
-      if (detailBit && ds)
-        push(ops, 'detail', directDetailPockets.length ? 'pocket' : 'pocket-detail', layeredPocketSegments(detailPockets, dr, ds), [], detailPockets.map((p) => p.shape.id))
+      for (const group of pocketGroups(roughPockets))
+        push(ops, 'rough', 'pocket', layeredPocketSegments(group.jobs, r, rs, group.pattern, group.angle), [], group.jobs.map((p) => p.shape.id))
+      if (detailBit && ds) {
+        for (const group of pocketGroups(detailPockets)) {
+          const kind = group.jobs.some((p) => p.shape.cut!.bit === 'detail') ? 'pocket' : 'pocket-detail'
+          push(ops, 'detail', kind, layeredPocketSegments(group.jobs, dr, ds, group.pattern, group.angle), [], group.jobs.map((p) => p.shape.id))
+        }
+      }
     }
     // Rest machining: what the rough bit's radius couldn't reach, widened so the detail bit can get in, clipped to the pocket.
     const selectedRadius = cut.bit === 'detail' ? dr : r

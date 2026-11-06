@@ -5,8 +5,8 @@ import { BITS, differingFields, findBit, findMaterial, MATERIALS, overrideError 
 // A self-contained, versioned document: the same JSON is the download format and the IndexedDB record,
 // so a sync backend can store it verbatim later.
 export const FILE_FORMAT = 'opencarve'
-// Version 2 is the first public format; version 3 adds each cut's bit choice. Older versions migrate below.
-export const FILE_VERSION = 3
+// Version 2 is the first public format; v3 adds each cut's bit choice and v4 its pocket pattern. Older versions migrate below.
+export const FILE_VERSION = 4
 
 export type EmbeddedFonts = Record<string, Omit<StoredFont, 'id'>>
 
@@ -70,6 +70,8 @@ function cut(v: unknown, what: string): Cut {
   return {
     type: oneOf(o, 'type', what, ['outline', 'pocket', 'vcarve'] as const),
     bit: oneOf(o, 'bit', what, ['auto', 'rough', 'detail'] as const),
+    pocketPattern: oneOf(o, 'pocketPattern', what, ['concentric', 'raster'] as const),
+    pocketAngle: num(o, 'pocketAngle', what),
     side: oneOf(o, 'side', what, ['outside', 'inside', 'on'] as const),
     depth: num(o, 'depth', what),
     tabs: bool(o, 'tabs', what),
@@ -258,6 +260,15 @@ function projectFromData(data: unknown, warnings: string[]): Project {
     const shapes = oldShapes.map((value: unknown) => {
       if (!isObj(value) || value.cut === undefined) return value
       return { ...value, cut: { ...obj(value.cut, 'cut'), bit: 'auto' } }
+    })
+    file = { ...file, version: 3, project: { ...oldProject, shapes } }
+  }
+  if (file.version === 3) {
+    const oldProject = obj(file.project, 'project')
+    const oldShapes = Array.isArray(oldProject.shapes) ? oldProject.shapes : fail('shapes must be an array')
+    const shapes = oldShapes.map((value: unknown) => {
+      if (!isObj(value) || value.cut === undefined) return value
+      return { ...value, cut: { ...obj(value.cut, 'cut'), pocketPattern: 'concentric', pocketAngle: 0 } }
     })
     file = { ...file, version: FILE_VERSION, project: { ...oldProject, shapes } }
   }

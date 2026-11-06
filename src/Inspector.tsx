@@ -166,6 +166,35 @@ function CutSection({ selected }: { selected: Shape[] }) {
           onChange={(bit) => setCut({ bit })}
         />
       )}
+      {type === 'pocket' && (
+        <>
+          <Segmented
+            label="Pocket pattern"
+            value={shared((s) => s.cut?.pocketPattern ?? '')}
+            options={[
+              { value: 'concentric', label: 'Concentric' },
+              { value: 'raster', label: 'Parallel lines' },
+            ]}
+            onChange={(pocketPattern) => setCut({ pocketPattern })}
+          />
+          {cuts.every((c) => c?.pocketPattern === 'raster') && (
+            <>
+              <div className="fields">
+                <Field
+                  label="Pattern angle °"
+                  value={shared((s) => trimNumber(s.cut!.pocketAngle))}
+                  step={1}
+                  onCommit={(text) => {
+                    const pocketAngle = Number(text)
+                    if (Number.isFinite(pocketAngle)) setCut({ pocketAngle })
+                  }}
+                />
+              </div>
+              <p className="hint">0° is horizontal; angles turn counter-clockwise.</p>
+            </>
+          )}
+        </>
+      )}
       {type === 'outline' && (
         <Segmented
           label="Cut side"

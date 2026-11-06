@@ -110,6 +110,7 @@ export interface CutSettings {
 }
 
 export type BitRole = 'rough' | 'detail'
+export type PocketPattern = 'concentric' | 'raster'
 
 // Smallest values the app accepts; the store clamps edits to them and the loader rejects anything below.
 export const LIMITS = { stockSize: 1, thickness: 1, travel: 1, maxRpm: 1, safeZ: 0.5 }
@@ -123,6 +124,8 @@ export const MAX_STEPOVER = 0.5 // beyond this, successive pocket rings can leav
 export interface Cut {
   type: 'outline' | 'pocket' | 'vcarve'
   bit: 'auto' | BitRole
+  pocketPattern: PocketPattern
+  pocketAngle: number // degrees counter-clockwise from +X; raster only
   side: 'outside' | 'inside' | 'on'
   depth: number // mm from top; >= stock.thickness means through
   tabs: boolean
@@ -212,6 +215,8 @@ export const isOpen = (s: Shape) => (s.type === 'path' ? !s.closed : s.type === 
 export const defaultCut = (thickness: number): Cut => ({
   type: 'outline',
   bit: 'auto',
+  pocketPattern: 'concentric',
+  pocketAngle: 0,
   side: 'outside',
   depth: thickness,
   tabs: true,
@@ -228,6 +233,7 @@ export function validCut(s: Shape, cut: Cut, thickness: number): Cut {
     ...cut,
     type: open ? 'outline' : cut.type,
     side: open ? 'on' : cut.side,
+    pocketAngle: ((cut.pocketAngle % 180) + 180) % 180,
     depth: clamp(cut.depth, 0.1, cut.type === 'vcarve' && !open ? thickness - 0.5 : thickness), // a V-carve's max depth, never through
     tabCount: Math.max(1, Math.round(cut.tabCount)),
     tabWidth: Math.max(0.1, cut.tabWidth),

@@ -202,6 +202,13 @@ test('sets a rectangle to a pocket cut', async ({ page }) => {
   await expect(page.getByLabel('Tabs')).toHaveCount(0)
   await expect(page.getByRole('radio', { name: 'Automatic' })).toBeChecked()
   await expect(page.getByRole('radio', { name: 'Detail only' })).toBeDisabled()
+  await expect(page.getByRole('radio', { name: 'Concentric' })).toBeChecked()
+  await page.getByRole('radio', { name: 'Parallel lines' }).click()
+  const angle = page.getByLabel('Pattern angle °')
+  await expect(angle).toHaveValue('0')
+  await angle.fill('225')
+  await angle.press('Enter')
+  await expect(angle).toHaveValue('45')
 })
 
 test('assigns a shape exclusively to the detail bit', async ({ page }) => {

@@ -21,7 +21,7 @@ const sample = (): Project => ({
   ],
 })
 
-const file = (project: unknown, extra = {}) => JSON.stringify({ format: 'opencarve', version: 3, project, ...extra })
+const file = (project: unknown, extra = {}) => JSON.stringify({ format: 'opencarve', version: 4, project, ...extra })
 
 // A fresh project with a detail bit and one carved shape of every type.
 const everyShape = (): Project => {
@@ -65,7 +65,7 @@ test('a missing field is rejected with its path', () => {
     'gcode', 'gcode.header', 'gcode.footer', 'gcode.replaceDefaults',
     ...['name', 'rotation'].map((k) => `shapes[0].${k}`), 'shapes[2].sides', 'shapes[3].closed', 'shapes[5].paths[0].closed',
     ...['font', 'letterSpacing', 'lineHeight', 'align', 'arc', 'mirror'].map((k) => `shapes[4].${k}`),
-    ...['type', 'bit', 'side', 'depth', 'tabs', 'tabCount', 'tabWidth', 'tabHeight'].map((k) => `shapes[1].cut.${k}`),
+    ...['type', 'bit', 'pocketPattern', 'pocketAngle', 'side', 'depth', 'tabs', 'tabCount', 'tabWidth', 'tabHeight'].map((k) => `shapes[1].cut.${k}`),
   ]
   expect(() => parseProject(without(everyShape(), 'project.id'))).toThrow('Invalid project file: project.id is missing')
   for (const path of paths) expect(() => parseProject(without(everyShape(), path)), path).toThrow(`Invalid project file: ${path} is missing`)
@@ -92,12 +92,25 @@ test('custom G-code: printable ASCII, tabs and line breaks, no G20/G91/G93 in th
 
 test('work zero: round-trips, validates and clamps', () => {
   const p = { ...sample(), origin: { preset: 'custom' as const, x: 12.5, y: 40, z: 'bottom' as const } }
-  expect(JSON.parse(serializeProject(p)).version).toBe(3)
+  expect(JSON.parse(serializeProject(p)).version).toBe(4)
   expect(parseProject(serializeProject(p))).toEqual(p)
   const legacy = JSON.parse(serializeProject(p))
   legacy.version = 2
-  for (const shape of legacy.project.shapes) if (shape.cut) delete shape.cut.bit
+  for (const shape of legacy.project.shapes) {
+    if (!shape.cut) continue
+    delete shape.cut.bit
+    delete shape.cut.pocketPattern
+    delete shape.cut.pocketAngle
+  }
   expect(parseProject(JSON.stringify(legacy))).toEqual(p)
+  const v3 = JSON.parse(serializeProject(p))
+  v3.version = 3
+  for (const shape of v3.project.shapes) {
+    if (!shape.cut) continue
+    delete shape.cut.pocketPattern
+    delete shape.cut.pocketAngle
+  }
+  expect(parseProject(JSON.stringify(v3))).toEqual(p)
   const old = sample()
   expect(() => parseProject(file(p, { version: 1 }))).toThrow('unsupported version 1')
   // Presets are re-derived from the stock.
@@ -116,7 +129,7 @@ test('work zero: round-trips, validates and clamps', () => {
 test('rejects garbage', () => {
   expect(() => parseProject('not json')).toThrow(/not JSON/)
   expect(() => parseProject('{"format":"svg"}')).toThrow(/not an OpenCarve project/)
-  expect(() => parseProject(file(sample(), { version: 4 }))).toThrow('Invalid project file: unsupported version 4 (this app reads version 3)')
+  expect(() => parseProject(file(sample(), { version: 5 }))).toThrow('Invalid project file: unsupported version 5 (this app reads version 4)')
   expect(() => parseProject(file({ ...sample(), shapes: 'x' }))).toThrow(/shapes must be an array/)
   expect(() => parseProject(file({ ...sample(), stock: { w: NaN, h: 1, thickness: 1 } }))).toThrow(/stock.w/)
   expect(() => parseProject(file({ ...sample(), shapes: [{ id: 'z', type: 'blob', x: 0, y: 0 }] }))).toThrow(/shapes\[0\].type/)
@@ -124,9 +137,9 @@ test('rejects garbage', () => {
 })
 
 test('validates cuts', () => {
-  const rect = { id: 'a', type: 'rect', name: 'R', x: 0, y: 0, rotation: 0, w: 5, h: 5, cut: { ...defaultCut(6), type: 'pocket', depth: 99, tabCount: 0 } }
+  const rect = { id: 'a', type: 'rect', name: 'R', x: 0, y: 0, rotation: 0, w: 5, h: 5, cut: { ...defaultCut(6), type: 'pocket', depth: 99, tabCount: 0, pocketPattern: 'raster', pocketAngle: 225 } }
   const p = parseProject(file({ ...sample(), stock: { w: 100, h: 80, thickness: 6 }, shapes: [rect] }))
-  expect(p.shapes[0]).toMatchObject({ cut: { type: 'pocket', depth: 6, tabCount: 1 } })
+  expect(p.shapes[0]).toMatchObject({ cut: { type: 'pocket', depth: 6, tabCount: 1, pocketPattern: 'raster', pocketAngle: 45 } })
   expect(() => parseProject(file({ ...sample(), shapes: [{ ...rect, cut: { ...rect.cut, bit: 'laser' } }] }))).toThrow(/cut.bit/)
 })
 

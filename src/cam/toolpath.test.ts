@@ -268,6 +268,50 @@ describe('plan and gcode', () => {
 
     expect(extents(signature([...pockets].reverse()))).toEqual(extents(signature(pockets)))
   })
+  it('raster-clears a pocket at the requested angle without crossing its hole or walls', () => {
+    const outer: Point[] = [[-30, -20], [30, -20], [30, 20], [-30, 20]]
+    const hole: Point[] = [[-10, -5], [-10, 5], [10, 5], [10, -5]]
+    const shape: CompoundShape = {
+      id: 'raster', type: 'compound', name: 'Raster', x: 60, y: 50, rotation: 0,
+      paths: [{ closed: true, points: outer }, { closed: true, points: hole }],
+      cut: { ...defaultCut(12), type: 'pocket', depth: 1, pocketPattern: 'raster', pocketAngle: 30 },
+    }
+    const p = project([shape])
+    p.cutSettings.rough.stepdown = 1
+    const op = planProject(p).ops[0]
+    const r = findBit('1/8-endmill').diameter / 2
+    const { dist, insideRegion } = regionProbe(shape)
+    const rasterAngles: number[] = []
+    let prev: Pt3 | null = null
+    let checked = 0
+    for (const seg of op.segments) {
+      for (const q of seg.points) {
+        if (prev && !seg.rapid && !seg.plunge && q[2] < 0 && (q[0] !== prev[0] || q[1] !== prev[1])) {
+          const length = Math.hypot(q[0] - prev[0], q[1] - prev[1])
+          if (seg.points.length === 1 && length > 5) rasterAngles.push(((Math.atan2(q[1] - prev[1], q[0] - prev[0]) * 180) / Math.PI + 180) % 180)
+          for (let k = 0; k <= 10; k++) {
+            const x = prev[0] + ((q[0] - prev[0]) * k) / 10
+            const y = prev[1] + ((q[1] - prev[1]) * k) / 10
+            expect(insideRegion(x, y)).toBe(true)
+            expect(dist(x, y)).toBeGreaterThan(r - 0.03)
+            checked++
+          }
+        }
+        prev = q
+      }
+    }
+    expect(checked).toBeGreaterThan(100)
+    const aligned = rasterAngles.filter((angle) => Math.abs(angle - 30) < 1e-5)
+    expect(aligned.length).toBeGreaterThan(5)
+    expect(aligned.length / rasterAngles.length).toBeGreaterThan(0.75) // the remainder are safe links between rows
+  })
+  it('combines overlapping raster pockets only when their angle matches', () => {
+    const pocket = (id: string, angle: number, w: number) => ({
+      ...rect(w, w), id, cut: { ...defaultCut(12), type: 'pocket' as const, depth: 2, pocketPattern: 'raster' as const, pocketAngle: angle },
+    })
+    expect(planProject(project([pocket('a', 45, 50), pocket('b', 45, 40)])).ops).toHaveLength(1)
+    expect(planProject(project([pocket('a', 45, 50), pocket('b', 90, 40)])).ops).toHaveLength(2)
+  })
   it('honours the bit selected for each outline and pocket', () => {
     const outline = { ...rect(20, 20), id: 'outline', cut: { ...defaultCut(12), bit: 'detail' as const } }
     const pocket = { ...rect(30, 30), id: 'pocket', x: 100, cut: { ...defaultCut(12), type: 'pocket' as const, bit: 'rough' as const, depth: 2 } }
