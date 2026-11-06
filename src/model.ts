@@ -138,6 +138,7 @@ export interface Cut {
   pocketPattern: PocketPattern
   pocketAngle: number // degrees counter-clockwise from +X; raster only
   pocketPrecut: boolean // score pocket walls with the smallest compatible bit before larger bits clear the interior
+  pocketRadius: number // requested radius for convex pocket corners, mm; the bit may impose a larger minimum
   side: 'outside' | 'inside' | 'on'
   depth: number // mm from top; >= stock.thickness means through
   tabs: boolean
@@ -237,6 +238,7 @@ export const defaultCut = (thickness: number): Cut => ({
   pocketPattern: 'concentric',
   pocketAngle: 0,
   pocketPrecut: false,
+  pocketRadius: 0,
   side: 'outside',
   depth: thickness,
   tabs: true,
@@ -254,6 +256,7 @@ export function validCut(s: Shape, cut: Cut, thickness: number): Cut {
     type: open ? 'outline' : cut.type,
     side: open ? 'on' : cut.side,
     pocketAngle: ((cut.pocketAngle % 180) + 180) % 180,
+    pocketRadius: Math.max(0, cut.pocketRadius),
     depth: clamp(cut.depth, 0.1, cut.type === 'vcarve' && !open ? thickness - 0.5 : thickness), // a V-carve's max depth, never through
     tabCount: Math.max(1, Math.round(cut.tabCount)),
     tabWidth: Math.max(0.1, cut.tabWidth),

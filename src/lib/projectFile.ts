@@ -5,8 +5,9 @@ import { BITS, differingFields, findBit, findMaterial, MATERIALS, overrideError 
 // A self-contained, versioned document: the same JSON is the download format and the IndexedDB record,
 // so a sync backend can store it verbatim later.
 export const FILE_FORMAT = 'opencarve'
-// v3 adds bit choice, v4 pocket patterns, v5 more patterns, v6 extensible bits, v7 pocket edge pre-cutting and v8 Bézier path nodes.
-export const FILE_VERSION = 8
+// v3 adds bit choice, v4 pocket patterns, v5 more patterns, v6 extensible bits, v7 pocket edge pre-cutting,
+// v8 Bézier path nodes and v9 pocket corner radii.
+export const FILE_VERSION = 9
 
 export type EmbeddedFonts = Record<string, Omit<StoredFont, 'id'>>
 
@@ -91,6 +92,7 @@ function cut(v: unknown, what: string, roles: BitRole[]): Cut {
     pocketPattern: oneOf(o, 'pocketPattern', what, ['concentric', 'raster', 'crosshatch', 'spiral', 'radial'] as const),
     pocketAngle: num(o, 'pocketAngle', what),
     pocketPrecut: bool(o, 'pocketPrecut', what),
+    pocketRadius: num(o, 'pocketRadius', what, 0),
     side: oneOf(o, 'side', what, ['outside', 'inside', 'on'] as const),
     depth: num(o, 'depth', what),
     tabs: bool(o, 'tabs', what),
@@ -308,7 +310,16 @@ function projectFromData(data: unknown, warnings: string[]): Project {
   }
   // v8 stores Bézier control nodes when a path has them. v7 paths remain valid polylines and gain straight nodes
   // only if the user edits them, preserving imported and existing project geometry exactly.
-  if (file.version === 7) file = { ...file, version: FILE_VERSION }
+  if (file.version === 7) file = { ...file, version: 8 }
+  if (file.version === 8) {
+    const oldProject = obj(file.project, 'project')
+    const oldShapes = Array.isArray(oldProject.shapes) ? oldProject.shapes : fail('shapes must be an array')
+    const shapes = oldShapes.map((value: unknown) => {
+      if (!isObj(value) || value.cut === undefined) return value
+      return { ...value, cut: { ...obj(value.cut, 'cut'), pocketRadius: 0 } }
+    })
+    file = { ...file, version: FILE_VERSION, project: { ...oldProject, shapes } }
+  }
   if (file.version !== FILE_VERSION) fail(`unsupported version ${String(file.version)} (this app reads version ${FILE_VERSION})`)
   const p = obj(file.project, 'project')
   const defaultMaterial = newProject().materialId

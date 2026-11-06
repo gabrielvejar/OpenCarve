@@ -7,7 +7,7 @@ import { positiveReliefShape } from '../lib/geometry'
 import { findBit, findMaterial, recommendedSettings } from '../lib/library'
 import { defaultCut, gcodeHeaderWarnings, newProject, type CompoundShape, type Point, type Project, type RectShape, type Shape } from '../model'
 import { toGcode } from './gcode'
-import { loopTabs, orient, outlinePaths, planProject, pocketRings, shapeRegion, withTabs, zLevels, type Op, type Pt3 } from './toolpath'
+import { loopTabs, orient, outlinePaths, planProject, pocketRings, roundPocket, shapeRegion, withTabs, zLevels, type Op, type Pt3 } from './toolpath'
 
 const area = (p: PathD) => p.reduce((a, q, i) => { const n = p[(i + 1) % p.length]; return a + q.x * n.y - n.x * q.y }, 0) / 2
 const bounds = (paths: PathsD) => {
@@ -60,6 +60,26 @@ describe('offset', () => {
     const sizes = rings.map((r) => bounds(r).w)
     expect(sizes).toEqual([...sizes].sort((a, b) => a - b))
     expect(sizes.at(-1)).toBeCloseTo(50 - 3.175, 2)
+  })
+  it('rounds pocket corners inward at the requested radius without moving its straight walls', () => {
+    const rounded = roundPocket(shapeRegion(rect(20, 10)), 3)
+    expect(bounds(rounded)).toEqual({ w: 20, h: 10 })
+    const exactArea = 200 - 4 * (3 ** 2 - (Math.PI * 3 ** 2) / 4)
+    expect(Math.abs(rounded.reduce((sum, path) => sum + area(path), 0) - exactArea)).toBeLessThan(0.2)
+    for (const corner of [[40, 45], [60, 45], [60, 55], [40, 55]]) {
+      expect(Math.min(...rounded.flat().map((p) => Math.hypot(p.x - corner[0], p.y - corner[1])))).toBeCloseTo(3 * (Math.SQRT2 - 1), 1)
+    }
+    const shape = { ...rect(20, 10), cut: { ...defaultCut(12), type: 'pocket' as const, depth: 2, pocketRadius: 3 } }
+    const points = planProject(project([shape], '1mm-endmill')).ops.flatMap((op) => op.segments.filter((s) => !s.rapid).flatMap((s) => s.points))
+    for (const corner of [[40, 45], [60, 45], [60, 55], [40, 55]]) {
+      expect(Math.min(...points.map((p) => Math.hypot(p[0] - corner[0], p[1] - corner[1])))).toBeGreaterThan(1.6)
+    }
+  })
+  it('warns when the requested corner radius removes the whole pocket', () => {
+    const shape = { ...rect(20, 10), cut: { ...defaultCut(12), type: 'pocket' as const, depth: 2, pocketRadius: 6 } }
+    const result = planProject(project([shape], '1mm-endmill'))
+    expect(result.ops).toHaveLength(0)
+    expect(result.warnings).toContain('Corner radius too large for Rect')
   })
 })
 

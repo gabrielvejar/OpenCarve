@@ -87,6 +87,9 @@ function islands(region: PathsD): PathsD[] {
 // Morphological opening: what a disc of radius d can reach.
 const opening = (p: PathsD, d: number) => inflate(inflate(p, -d), d)
 
+// A pocket radius is a morphological opening: it rounds convex corners inward without moving straight walls.
+export const roundPocket = (region: PathsD, radius: number) => opening(region, radius)
+
 export const outlinePaths = (region: PathsD, side: Cut['side'], r: number) => inflate(region, side === 'on' ? 0 : side === 'outside' ? r : -r)
 
 // Tool-centre rings, innermost first; the last one (offset -r) is the finishing wall.
@@ -567,11 +570,16 @@ export function planProject(project: Project): CamResult {
   const automaticPocketTools = flatTools.length ? flatTools : machiningTools
   const automaticOutlineTool = automaticPocketTools[0] ?? tools[0]
   const vTool = [...tools].reverse().find((tool) => tool.bit.type === 'vbit') ?? null
-  const pockets = carved
+  const pocketShapes = carved
     .filter((s) => s.cut!.type === 'pocket')
-    .map((shape) => ({ shape, region: shapeRegion(shape), depth: Math.min(shape.cut!.depth, t) }))
-    .filter((p) => p.region.length)
-  const pocketRegions = new Map(pockets.map((p) => [p.shape.id, p.region]))
+    .map((shape) => {
+      const source = shapeRegion(shape)
+      const region = roundPocket(source, shape.cut!.pocketRadius)
+      if (source.length && !region.length) warnings.push(`Corner radius too large for ${shape.name}`)
+      return { shape, region, depth: Math.min(shape.cut!.depth, t) }
+    })
+  const pocketRegions = new Map(pocketShapes.map((p) => [p.shape.id, p.region]))
+  const pockets = pocketShapes.filter((p) => p.region.length)
   const precutPockets = pockets.filter((p) => p.shape.cut!.pocketPrecut && p.shape.cut!.bit === 'auto')
   const edgeTool = flatTools.length > 1 && flatTools[0].bit.diameter > flatTools.at(-1)!.bit.diameter + 1e-9 ? flatTools.at(-1)! : null
   type PocketJob = (typeof pockets)[number] & { full: boolean }

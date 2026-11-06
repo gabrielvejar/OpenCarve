@@ -191,6 +191,18 @@ function CutSection({ selected }: { selected: Shape[] }) {
                 ? 'Edge pre-cutting requires Automatic bit usage.'
                 : 'Run the smallest-bit file first to score outer walls and inner islands before larger bits clear the pocket.'}
           </p>
+          <div className="fields">
+            <Field
+              label="Corner radius"
+              value={shared((s) => formatLength(s.cut!.pocketRadius, units))}
+              step={units === 'in' ? 0.01 : 0.1}
+              onCommit={(text) => {
+                const pocketRadius = parseLength(text, units)
+                if (pocketRadius !== null && Number.isFinite(pocketRadius) && pocketRadius >= 0) setCut({ pocketRadius })
+              }}
+            />
+          </div>
+          <p className="hint">Rounds pocket corners inward. The cutter radius remains the physical minimum.</p>
           <label className="field wide">
             <span>Pocket pattern</span>
             <select
