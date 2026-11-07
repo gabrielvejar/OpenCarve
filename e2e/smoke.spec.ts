@@ -32,6 +32,31 @@ test('Settings hides the 3D preview and widens the panel', async ({ page }) => {
   expect(await settledWidth(panel)).toBe(narrow)
 })
 
+test('selects and remembers each visual theme from Settings', async ({ page }) => {
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  const themes = page.getByRole('radiogroup', { name: 'Visual theme' })
+  await expect(themes.getByRole('radio')).toHaveCount(4)
+
+  for (const [name, id, accent] of [
+    ['Precision Dark', 'precision-dark', '#22d3ee'],
+    ['Workshop Warm', 'workshop-warm', '#df5a17'],
+    ['Industrial Blueprint', 'industrial-blueprint', '#f4ae24'],
+    ['Modern Light', 'modern-light', '#4f46e5'],
+  ]) {
+    await themes.getByText(name, { exact: true }).click()
+    await expect(themes.getByRole('radio', { name: new RegExp(name) })).toBeChecked()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', id)
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim())).toBe(accent)
+  }
+
+  await themes.getByText('Precision Dark', { exact: true }).click()
+
+  await page.reload()
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'precision-dark')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await expect(page.getByRole('radio', { name: /Precision Dark/ })).toBeChecked()
+})
+
 test('a stock change on Settings after orbiting re-frames the 3D view on return', async ({ page }) => {
   const preview = page.getByLabel('3D carve preview')
   const panelWidth = async () => (await page.locator('.panel').boundingBox())!.width

@@ -5,7 +5,7 @@ import type { Op, Pt3 } from '../cam/toolpath'
 import { effectiveBit } from '../lib/library'
 import { configuredBitRoles } from '../model'
 import type { Bit } from '../model'
-import { useAppStore } from '../store'
+import { useAppStore, type Theme } from '../store'
 import PlaybackBar from './PlaybackBar'
 import type { SurfaceMesh } from './sim'
 import { fracAt, moveAt, positionAt, timelineFor, type Timeline } from './timeline'
@@ -13,7 +13,18 @@ import { onProgress, requestProgress, useSim } from './useSim'
 
 // Model → three: X → x, Y → −z, Z → y (three is Y-up with Z toward the viewer). The surface mesh is built in the sim worker.
 const SIDES = 0xd8bd92
-const LINE_COLORS = { rough: 0x2563eb, detail: 0x9333ea, vcarve: 0xea580c } // as the 2D overlay
+const THEME_BACKGROUND: Record<Theme, number> = {
+  'precision-dark': 0x0b121a,
+  'workshop-warm': 0xf5ead8,
+  'industrial-blueprint': 0x041c33,
+  'modern-light': 0xf0f2f7,
+}
+const THEME_LINES: Record<Theme, { rough: number; detail: number; vcarve: number }> = {
+  'precision-dark': { rough: 0x22d3ee, detail: 0xa78bfa, vcarve: 0xfb923c },
+  'workshop-warm': { rough: 0x1f6b55, detail: 0xb45309, vcarve: 0xc2410c },
+  'industrial-blueprint': { rough: 0x2ec5ff, detail: 0xf4ae24, vcarve: 0xff7b29 },
+  'modern-light': { rough: 0x4f46e5, detail: 0x0891b2, vcarve: 0xea580c },
+}
 const LINE_LIFT = 0.05 // mm, keeps toolpath lines out of the cut floor
 const VIEW_DIR: [number, number, number] = [-0.5, 0.9, 1] // front-left-top
 const CUTTER_LEN = 20 // mm, tool model
@@ -76,10 +87,10 @@ function surfaceGeometry(T: typeof THREE, mesh: SurfaceMesh) {
 
 // Feed moves as line segments in timeline order. starts[i] counts the segments before move i, so the part already
 // travelled is a draw range.
-function toolpathGeometry(T: typeof THREE, tl: Timeline, ops: Op[]) {
+function toolpathGeometry(T: typeof THREE, tl: Timeline, ops: Op[], palette: (typeof THEME_LINES)[Theme]) {
   const pos: number[] = []
   const col: number[] = []
-  const colors = { rough: new T.Color(LINE_COLORS.rough), detail: new T.Color(LINE_COLORS.detail), vcarve: new T.Color(LINE_COLORS.vcarve) }
+  const colors = { rough: new T.Color(palette.rough), detail: new T.Color(palette.detail), vcarve: new T.Color(palette.vcarve) }
   const starts = new Uint32Array(tl.moves.length + 1)
   tl.moves.forEach(({ a, b, cut, op, role }, i) => {
     starts[i + 1] = starts[i] + (cut ? 1 : 0)
@@ -178,6 +189,7 @@ export default function Preview3D() {
   const bits = useAppStore((s) => s.project.bits)
   const bitOverrides = useAppStore((s) => s.project.bitOverrides)
   const playing = useAppStore((s) => s.anim.playing)
+  const theme = useAppStore((s) => s.theme)
   const tl = useMemo(() => (cam ? timelineFor(cam.ops, settings) : null), [cam, settings])
   const [showLines, setShowLines] = useState(true)
   const [ready, setReady] = useState(false)
@@ -311,6 +323,13 @@ export default function Preview3D() {
     view.render()
   }, [ready, stock])
 
+  useEffect(() => {
+    const view = viewRef.current
+    if (!view) return
+    view.renderer.setClearColor(THEME_BACKGROUND[theme])
+    view.render()
+  }, [ready, theme])
+
   // Work-zero gizmo (X red, Y green, Z blue). Scene axes: x = stock X, y = up, -z = stock Y; drawn over the stock.
   useEffect(() => {
     const view = viewRef.current
@@ -366,7 +385,7 @@ export default function Preview3D() {
     const { T, materials: m } = view
     let lines
     if (linesOn && cam && tl) {
-      const { g, starts } = toolpathGeometry(T, tl, cam.ops)
+      const { g, starts } = toolpathGeometry(T, tl, cam.ops, THEME_LINES[theme])
       const dimG = new T.BufferGeometry() // same buffers, its own draw range
       dimG.setAttribute('position', g.getAttribute('position'))
       dimG.setAttribute('color', g.getAttribute('color'))
@@ -376,7 +395,7 @@ export default function Preview3D() {
     objs.current.lines = lines
     objs.current.idx = -1
     sync()
-  }, [ready, cam, tl, linesOn, sync])
+  }, [ready, cam, tl, linesOn, sync, theme])
 
   useEffect(() => {
     const view = viewRef.current

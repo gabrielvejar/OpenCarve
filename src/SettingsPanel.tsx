@@ -4,7 +4,7 @@ import { Field, Section, Segmented } from './Inspector'
 import { BITS, effectiveBit, findBit, findMaterial, MACHINES, MATERIALS, overrideError } from './lib/library'
 import { formatLength, mmToIn, parseLength, type Units } from './lib/units'
 import { bitRoleLabel, configuredBitRoles, gcodeBlockError, gcodeHeaderWarnings, MAX_GCODE_BLOCK, MAX_STEPOVER, type BitOverride, type BitRole, type OriginPreset, type ProjectBits } from './model'
-import { useAppStore } from './store'
+import { THEMES, useAppStore } from './store'
 
 const BIT_TYPES = { endmill: 'Endmill', ballnose: 'Ballnose', vbit: 'V-bit' }
 
@@ -200,6 +200,7 @@ function GcodeSection() {
 
 export default function SettingsPanel() {
   const project = useAppStore((s) => s.project)
+  const theme = useAppStore((s) => s.theme)
   const { units, stock, machine, bits, cutSettings, cutSettingsCustom } = project
   const st = useAppStore.getState
   const roles = configuredBitRoles(project)
@@ -286,6 +287,23 @@ export default function SettingsPanel() {
   const preset = MACHINES.find((m) => m.name === machine.name)
   return (
     <div className="settings-grid">
+      <Section title="Appearance">
+        <div className="theme-picker" role="radiogroup" aria-label="Visual theme">
+          {THEMES.map((option) => (
+            <label key={option.id} className={`theme-choice preview-${option.id}`}>
+              <input type="radio" name="visual-theme" checked={theme === option.id} onChange={() => st().setTheme(option.id)} />
+              <span className="theme-mini" aria-hidden="true">
+                <i />
+                <i />
+                <i />
+              </span>
+              <strong>{option.name}</strong>
+              <small>{option.description}</small>
+            </label>
+          ))}
+        </div>
+        <p className="hint">Saved in this browser and applied immediately; project files remain appearance-neutral.</p>
+      </Section>
       <Section title="Stock">
         <div className="fields">
           {length('Width', stock.w, (w) => st().setStock({ w }))}

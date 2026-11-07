@@ -10,6 +10,13 @@ import { configuredBitRoles, defaultCut, fitOrigin, gcodeBlockError, LIMITS, new
 export type Step = 'settings' | 'design' | 'simulate' | 'export'
 export type Screen = 'home' | 'editor'
 export type Tool = 'select' | 'rect' | 'ellipse' | 'polygon' | 'pen' | 'text'
+export type Theme = 'precision-dark' | 'workshop-warm' | 'industrial-blueprint' | 'modern-light'
+export const THEMES: { id: Theme; name: string; description: string }[] = [
+  { id: 'precision-dark', name: 'Precision Dark', description: 'Graphite, cyan and high contrast' },
+  { id: 'workshop-warm', name: 'Workshop Warm', description: 'Ivory, forest and burnt orange' },
+  { id: 'industrial-blueprint', name: 'Industrial Blueprint', description: 'Navy, steel and safety amber' },
+  { id: 'modern-light', name: 'Modern Light', description: 'Soft white, indigo and mint' },
+]
 export const TOOL_KEYS: Record<Tool, string> = { select: 'V', rect: 'R', ellipse: 'E', polygon: 'P', pen: 'N', text: 'T' }
 export type Align = 'left' | 'centerX' | 'right' | 'top' | 'centerY' | 'bottom'
 export interface Anim {
@@ -30,6 +37,17 @@ export interface View {
 
 const MAX_HISTORY = 100
 const SNAP_KEY = 'opencarve:snap'
+const THEME_KEY = 'opencarve:theme'
+
+function storedTheme(): Theme {
+  try {
+    const theme = localStorage.getItem(THEME_KEY)
+    if (THEMES.some((option) => option.id === theme)) return theme as Theme
+  } catch {
+    // no storage
+  }
+  return 'modern-light'
+}
 
 function storedSnap(): Snap {
   try {
@@ -51,6 +69,7 @@ interface AppState {
   tool: Tool
   view: View
   snap: Snap // an editor preference: not undoable, not in the project file
+  theme: Theme // a browser preference: not undoable, not in the project file
   past: Project[]
   future: Project[]
   transientBase: Project | null
@@ -93,6 +112,7 @@ interface AppState {
   setUnits: (units: Units) => void
   setView: (patch: Partial<View>) => void
   setSnap: (patch: Partial<Snap>) => void
+  setTheme: (theme: Theme) => void
   fitView: (width: number, height: number) => void
   beginTransient: () => number
   commit: (gesture?: number) => void
@@ -143,6 +163,7 @@ export const useAppStore = create<AppState>()((set, get) => {
     tool: 'select',
     view: { zoom: 2, panX: 0, panY: 0 },
     snap: storedSnap(),
+    theme: storedTheme(),
     past: [],
     future: [],
     transientBase: null,
@@ -348,6 +369,14 @@ export const useAppStore = create<AppState>()((set, get) => {
       } catch {
         // storage full or blocked: the setting lasts for this session
       }
+    },
+    setTheme: (theme) => {
+      try {
+        localStorage.setItem(THEME_KEY, theme)
+      } catch {
+        // preference still applies for this session
+      }
+      set({ theme })
     },
 
     fitView: (width, height) => {

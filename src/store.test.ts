@@ -88,6 +88,21 @@ test('no-op edits and unit changes are not undo entries', () => {
   expect(store().project.units).toBe('in')
 })
 
+test('the visual theme is a persistent browser preference, not project history', () => {
+  const preferences = new Map<string, string>()
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => preferences.get(key) ?? null,
+    setItem: (key: string, value: string) => preferences.set(key, value),
+  })
+  store().setTheme('precision-dark')
+  expect(store().theme).toBe('precision-dark')
+  expect(localStorage.getItem('opencarve:theme')).toBe('precision-dark')
+  expect(store().past).toHaveLength(0)
+
+  store().setTheme('modern-light')
+  vi.unstubAllGlobals()
+})
+
 const path = (id: string, closed: boolean): Shape => ({ id, name: id, type: 'path', x: 0, y: 0, rotation: 0, closed, points: [[0, 0], [10, 0], [10, 10]] })
 
 test('new shapes get a through outline cut', () => {
