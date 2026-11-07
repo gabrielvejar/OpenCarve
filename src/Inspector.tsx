@@ -203,6 +203,34 @@ function CutSection({ selected }: { selected: Shape[] }) {
             />
           </div>
           <p className="hint">Rounds pocket corners inward. The cutter radius remains the physical minimum.</p>
+          <Segmented
+            label="Bottom fillet"
+            value={shared((s) => s.cut?.pocketFillet ?? '')}
+            options={[
+              { value: 'none', label: 'None' },
+              { value: 'concave', label: 'Concave' },
+              { value: 'convex', label: 'Convex' },
+            ]}
+            onChange={(pocketFillet) => setCut({ pocketFillet })}
+          />
+          {cuts.every((c) => c?.pocketFillet !== 'none') && (
+            <>
+              <div className="fields">
+                <Field
+                  label="Fillet radius"
+                  value={shared((s) => formatLength(s.cut!.pocketFilletRadius, units))}
+                  step={units === 'in' ? 0.01 : 0.1}
+                  onCommit={(text) => {
+                    const pocketFilletRadius = parseLength(text, units)
+                    if (pocketFilletRadius !== null && Number.isFinite(pocketFilletRadius) && pocketFilletRadius >= 0) setCut({ pocketFilletRadius })
+                  }}
+                />
+              </div>
+              <p className="hint">
+                Concave leaves a standard inside fillet; Convex uses the opposite rounded ramp. Flat cutters leave fine terraces; a ballnose gives a smoother finish.
+              </p>
+            </>
+          )}
           <label className="field wide">
             <span>Pocket pattern</span>
             <select

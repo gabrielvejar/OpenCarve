@@ -6,8 +6,8 @@ import { BITS, differingFields, findBit, findMaterial, MATERIALS, overrideError 
 // so a sync backend can store it verbatim later.
 export const FILE_FORMAT = 'opencarve'
 // v3 adds bit choice, v4 pocket patterns, v5 more patterns, v6 extensible bits, v7 pocket edge pre-cutting,
-// v8 Bézier path nodes and v9 pocket corner radii.
-export const FILE_VERSION = 9
+// v8 Bézier path nodes, v9 pocket corner radii and v10 bottom fillets.
+export const FILE_VERSION = 10
 
 export type EmbeddedFonts = Record<string, Omit<StoredFont, 'id'>>
 
@@ -93,6 +93,8 @@ function cut(v: unknown, what: string, roles: BitRole[]): Cut {
     pocketAngle: num(o, 'pocketAngle', what),
     pocketPrecut: bool(o, 'pocketPrecut', what),
     pocketRadius: num(o, 'pocketRadius', what, 0),
+    pocketFillet: oneOf(o, 'pocketFillet', what, ['none', 'concave', 'convex'] as const),
+    pocketFilletRadius: num(o, 'pocketFilletRadius', what, 0),
     side: oneOf(o, 'side', what, ['outside', 'inside', 'on'] as const),
     depth: num(o, 'depth', what),
     tabs: bool(o, 'tabs', what),
@@ -317,6 +319,15 @@ function projectFromData(data: unknown, warnings: string[]): Project {
     const shapes = oldShapes.map((value: unknown) => {
       if (!isObj(value) || value.cut === undefined) return value
       return { ...value, cut: { ...obj(value.cut, 'cut'), pocketRadius: 0 } }
+    })
+    file = { ...file, version: 9, project: { ...oldProject, shapes } }
+  }
+  if (file.version === 9) {
+    const oldProject = obj(file.project, 'project')
+    const oldShapes = Array.isArray(oldProject.shapes) ? oldProject.shapes : fail('shapes must be an array')
+    const shapes = oldShapes.map((value: unknown) => {
+      if (!isObj(value) || value.cut === undefined) return value
+      return { ...value, cut: { ...obj(value.cut, 'cut'), pocketFillet: 'none', pocketFilletRadius: 0 } }
     })
     file = { ...file, version: FILE_VERSION, project: { ...oldProject, shapes } }
   }

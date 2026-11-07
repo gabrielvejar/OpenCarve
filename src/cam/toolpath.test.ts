@@ -7,7 +7,7 @@ import { positiveReliefShape } from '../lib/geometry'
 import { findBit, findMaterial, recommendedSettings } from '../lib/library'
 import { defaultCut, gcodeHeaderWarnings, newProject, type CompoundShape, type Point, type Project, type RectShape, type Shape } from '../model'
 import { toGcode } from './gcode'
-import { loopTabs, orient, outlinePaths, planProject, pocketRings, roundPocket, shapeRegion, withTabs, zLevels, type Op, type Pt3 } from './toolpath'
+import { loopTabs, orient, outlinePaths, planProject, pocketFilletInset, pocketRings, roundPocket, shapeRegion, withTabs, zLevels, type Op, type Pt3 } from './toolpath'
 
 const area = (p: PathD) => p.reduce((a, q, i) => { const n = p[(i + 1) % p.length]; return a + q.x * n.y - n.x * q.y }, 0) / 2
 const bounds = (paths: PathsD) => {
@@ -80,6 +80,33 @@ describe('offset', () => {
     const result = planProject(project([shape], '1mm-endmill'))
     expect(result.ops).toHaveLength(0)
     expect(result.warnings).toContain('Corner radius too large for Rect')
+  })
+  it('uses opposite gradual profiles for concave and convex bottom fillets', () => {
+    expect(pocketFilletInset('concave', 4, 6, 2)).toBe(0)
+    expect(pocketFilletInset('convex', 4, 6, 2)).toBe(0)
+    expect(pocketFilletInset('concave', 4, 6, 4)).toBeCloseTo(4 * (1 - Math.sqrt(0.75)))
+    expect(pocketFilletInset('convex', 4, 6, 4)).toBeCloseTo(4 * Math.sqrt(0.75))
+    expect(pocketFilletInset('concave', 4, 6, 6)).toBe(4)
+    expect(pocketFilletInset('convex', 4, 6, 6)).toBe(4)
+  })
+  it('plans safe stepped wall-to-floor transitions for both fillet directions', () => {
+    const widths = (pocketFillet: 'concave' | 'convex') => {
+      const shape = { ...rect(40, 30), cut: { ...defaultCut(12), type: 'pocket' as const, depth: 6, pocketFillet, pocketFilletRadius: 4 } }
+      const p = project([shape], '1mm-endmill')
+      p.cutSettings.rough.stepdown = 2
+      const points = planProject(p).ops.flatMap((op) => op.segments.filter((s) => !s.rapid).flatMap((s) => s.points))
+      expect(Math.min(...points.map((point) => point[2]))).toBe(-6)
+      const at = (z: number) => points.filter((point) => Math.abs(point[2] - z) < 1e-9)
+      const width = (z: number) => Math.max(...at(z).map((point) => point[0])) - Math.min(...at(z).map((point) => point[0]))
+      return { wall: width(-2), middle: width(-4), floor: width(-6) }
+    }
+    const concave = widths('concave')
+    const convex = widths('convex')
+    expect(concave.wall).toBeCloseTo(39, 1)
+    expect(convex.wall).toBeCloseTo(39, 1)
+    expect(concave.middle).toBeGreaterThan(convex.middle + 5)
+    expect(concave.floor).toBeCloseTo(31, 1)
+    expect(convex.floor).toBeCloseTo(31, 1)
   })
 })
 

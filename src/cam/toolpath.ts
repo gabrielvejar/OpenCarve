@@ -52,6 +52,8 @@ export interface CamResult {
 const PRECISION = 3 // decimals, 0.001 mm
 const ARC_TOLERANCE = 0.01 // mm
 const SLIVER = 0.02 // mm; rest-machining leftovers thinner than this are float noise
+// ponytail: flat cutters approximate bottom curves in 0.25 mm terraces; true 3D scallop control can replace this.
+const FILLET_Z_STEP = 0.25
 
 const fillRule = (s: Shape) => (s.fillRule === 'evenodd' ? FillRule.EvenOdd : FillRule.NonZero)
 const boolean = (type: ClipType, a: PathsD, b: PathsD | null) => booleanOpD(type, a, b, FillRule.NonZero, PRECISION)
@@ -439,14 +441,45 @@ function cutPatternLevel(plan: ReturnType<typeof patternedPocketPlan>, L: Return
   }
 }
 
+type ProfiledPocket = {
+  region: PathsD
+  profileRegion: PathsD
+  depth: number
+  fillet: Cut['pocketFillet']
+  filletRadius: number
+}
+
+// Horizontal inset of the pocket boundary at a positive depth from the stock top. Concave is tangent to the
+// vertical wall and floor; Convex is the agreed machinable opposite-curvature ramp rather than an undercut.
+export function pocketFilletInset(mode: Cut['pocketFillet'], radius: number, pocketDepth: number, depth: number) {
+  const r = Math.min(Math.max(0, radius), pocketDepth)
+  if (mode === 'none' || !r || depth <= pocketDepth - r) return 0
+  const t = Math.min(1, Math.max(0, (depth - (pocketDepth - r)) / r))
+  return mode === 'concave' ? r * (1 - Math.sqrt(Math.max(0, 1 - t * t))) : r * Math.sqrt(Math.max(0, 1 - (1 - t) ** 2))
+}
+
+const profiledRegion = (pocket: ProfiledPocket, depth: number) => {
+  const inset = pocketFilletInset(pocket.fillet, pocket.filletRadius, pocket.depth, depth)
+  return inset ? boolean(ClipType.Intersection, pocket.region, inflate(pocket.profileRegion, -inset)) : pocket.region
+}
+
+const pocketLevels = (pocket: ProfiledPocket, stepdown: number) => {
+  const levels = zLevels(pocket.depth, stepdown).map((z) => -z)
+  const r = Math.min(pocket.filletRadius, pocket.depth)
+  if (pocket.fillet === 'none' || !r) return levels
+  const step = Math.min(stepdown, FILLET_Z_STEP)
+  for (let depth = pocket.depth - r + step; depth < pocket.depth - 1e-9; depth += step) levels.push(depth)
+  return levels
+}
+
 // Plans overlapping pockets as one depth field. At each Z level the active region is the union of every pocket
 // whose requested depth reaches that level, so shared material is cleared once instead of once per shape.
-function layeredPocketSegments(pockets: { region: PathsD; depth: number }[], r: number, s: CutSettings, pattern: Cut['pocketPattern'] = 'concentric', angle = 0) {
-  const raw = pockets.flatMap((p) => zLevels(p.depth, s.stepdown).map((z) => -z)).sort((a, b) => a - b)
+function layeredPocketSegments(pockets: ProfiledPocket[], r: number, s: CutSettings, pattern: Cut['pocketPattern'] = 'concentric', angle = 0) {
+  const raw = pockets.flatMap((p) => pocketLevels(p, s.stepdown)).sort((a, b) => a - b)
   const levels = raw.filter((d, i) => !i || d - raw[i - 1] > 1e-9)
   const L = linker(s.safeZ)
   for (const depth of levels) {
-    const active = pockets.filter((p) => p.depth + 1e-9 >= depth).flatMap((p) => p.region)
+    const active = pockets.filter((p) => p.depth + 1e-9 >= depth).flatMap((p) => profiledRegion(p, depth))
     const region = boolean(ClipType.Union, active, null)
     if (pattern !== 'concentric') cutPatternLevel(patternedPocketPlan(region, r, s, pattern, angle), L, -depth)
     else cutPocketLevel(pocketPlan(region, r, s), L, -depth)
@@ -455,12 +488,12 @@ function layeredPocketSegments(pockets: { region: PathsD; depth: number }[], r: 
 }
 
 // Scores every current pocket wall, including hole/island boundaries, before a wider bit reaches it.
-function pocketEdgeSegments(pockets: { region: PathsD; depth: number }[], r: number, s: CutSettings) {
-  const raw = pockets.flatMap((p) => zLevels(p.depth, s.stepdown).map((z) => -z)).sort((a, b) => a - b)
+function pocketEdgeSegments(pockets: ProfiledPocket[], r: number, s: CutSettings) {
+  const raw = pockets.flatMap((p) => pocketLevels(p, s.stepdown)).sort((a, b) => a - b)
   const levels = raw.filter((d, i) => !i || d - raw[i - 1] > 1e-9)
   const L = linker(s.safeZ)
   for (const depth of levels) {
-    const active = pockets.filter((p) => p.depth + 1e-9 >= depth).flatMap((p) => p.region)
+    const active = pockets.filter((p) => p.depth + 1e-9 >= depth).flatMap((p) => profiledRegion(p, depth))
     for (const path of inflate(boolean(ClipType.Union, active, null), -r)) {
       const points = closedPts(orient(path, areaD(path) < 0, s.direction))
       L.moveTo([...points[0], -depth], false)
@@ -575,8 +608,12 @@ export function planProject(project: Project): CamResult {
     .map((shape) => {
       const source = shapeRegion(shape)
       const region = roundPocket(source, shape.cut!.pocketRadius)
+      const depth = Math.min(shape.cut!.depth, t)
+      const filletRadius = Math.min(shape.cut!.pocketFilletRadius, depth)
       if (source.length && !region.length) warnings.push(`Corner radius too large for ${shape.name}`)
-      return { shape, region, depth: Math.min(shape.cut!.depth, t) }
+      if (region.length && shape.cut!.pocketFillet !== 'none' && filletRadius && !inflate(region, -filletRadius).length)
+        warnings.push(`Bottom fillet radius too large for ${shape.name}`)
+      return { shape, region, profileRegion: region, depth, fillet: shape.cut!.pocketFillet, filletRadius }
     })
   const pocketRegions = new Map(pocketShapes.map((p) => [p.shape.id, p.region]))
   const pockets = pocketShapes.filter((p) => p.region.length)
