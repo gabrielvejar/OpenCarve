@@ -16,7 +16,7 @@ Free, open-source (AGPL-3.0) design and toolpath software for hobby CNC routers,
 - **Bit overrides**: adjust a library bit's diameter, and a V-bit's angle and flat tip, to match the bit you actually have. Overrides are saved in the project, marked "Custom" and can be reset; recommended settings follow the adjusted bit.
 - **Machine presets**: Generic GRBL, 3018, Onefinity Woodworker, Shapeoko 4 XL/XXL, TwoTrees TTC450 (500 W), X-Carve 750/1000, or a custom work area and max RPM.
 - **Selectable work zero**: put XY zero at any stock corner, the centre, or a custom offset, and Z zero at the top of the stock or its bottom (the spoilboard). The canvas marker, cursor readout, shape positions, 3D preview and G-code all follow it.
-- **Cuts**: outline (outside, inside or on the path, with tabs), pocket and V-carve. Each shape can use every configured bit automatically or be assigned to one specific bit. Pocket corners can be rounded in XY, and the wall-to-floor transition can use a concave fillet or a machinable convex rounded ramp with a chosen radius. Pocket patterns include concentric, angled parallel lines, crosshatch, spiral and radial clearing; overlapping pockets with the same pattern and angle are combined by depth so shared material is cleared only once. An optional edge pre-cut scores outer walls and inner islands with the smallest bit before larger bits clear the pocket.
+- **Cuts**: outline (outside, inside or on the path, with tabs), pocket and V-carve. Each shape can use every configured bit automatically or be assigned to one specific bit. Pocket corners can be rounded in XY, and the wall-to-floor transition can use a concave fillet or a machinable convex rounded ramp with a chosen radius and per-shape stepdown capped by the bit setting. Pocket patterns include concentric, angled parallel lines, crosshatch, spiral and radial clearing; overlapping pockets with the same pattern and angle are combined by depth so shared material is cleared only once. An optional edge pre-cut scores outer walls and inner islands with the smallest bit before larger bits clear the pocket.
 - **Multi-bit carves**: configure as many bits as the job needs. In Automatic mode, flat cutters normally run from largest to smallest; the first fitting bit clears the pocket and each smaller bit only rest-machines what its predecessor couldn't reach. Edge pre-cutting moves the smallest-bit file to the front. V-bits finish V-carves, and Export produces one G-code file per bit in machining order.
 - **Simulate**: toolpaths on the 2D canvas, a 3D preview of the carved result, warnings and an estimated time.
 - **Toolpath animation**: watch a model of the bit run the job in the 3D preview in G-code order, with play/pause, 1×–50× speed and a scrub bar, and optionally see the material removed as it goes.
@@ -48,7 +48,7 @@ Tested in Chromium (Chrome, Edge); should work in Firefox and Safari. Toolpaths 
 
 ## Project files
 
-A `.oc` file is JSON: `{ "format": "opencarve", "version": 10, "project": { ... } }`. All lengths are in millimetres, whatever the display units. Newer versions of OpenCarve keep opening files saved by earlier versions.
+A `.oc` file is JSON: `{ "format": "opencarve", "version": 11, "project": { ... } }`. All lengths are in millimetres, whatever the display units. Newer versions of OpenCarve keep opening files saved by earlier versions.
 
 ## Development
 

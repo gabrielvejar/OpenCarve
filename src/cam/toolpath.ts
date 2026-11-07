@@ -52,8 +52,6 @@ export interface CamResult {
 const PRECISION = 3 // decimals, 0.001 mm
 const ARC_TOLERANCE = 0.01 // mm
 const SLIVER = 0.02 // mm; rest-machining leftovers thinner than this are float noise
-// ponytail: flat cutters approximate bottom curves in 0.25 mm terraces; true 3D scallop control can replace this.
-const FILLET_Z_STEP = 0.25
 
 const fillRule = (s: Shape) => (s.fillRule === 'evenodd' ? FillRule.EvenOdd : FillRule.NonZero)
 const boolean = (type: ClipType, a: PathsD, b: PathsD | null) => booleanOpD(type, a, b, FillRule.NonZero, PRECISION)
@@ -447,6 +445,7 @@ type ProfiledPocket = {
   depth: number
   fillet: Cut['pocketFillet']
   filletRadius: number
+  filletStepdown: number
 }
 
 // Horizontal inset of the pocket boundary at a positive depth from the stock top. Concave is tangent to the
@@ -467,7 +466,8 @@ const pocketLevels = (pocket: ProfiledPocket, stepdown: number) => {
   const levels = zLevels(pocket.depth, stepdown).map((z) => -z)
   const r = Math.min(pocket.filletRadius, pocket.depth)
   if (pocket.fillet === 'none' || !r) return levels
-  const step = Math.min(stepdown, FILLET_Z_STEP)
+  const step = pocket.filletStepdown > 0 ? Math.min(stepdown, pocket.filletStepdown) : stepdown
+  if (step >= stepdown - 1e-9) return levels
   for (let depth = pocket.depth - r + step; depth < pocket.depth - 1e-9; depth += step) levels.push(depth)
   return levels
 }
@@ -613,7 +613,7 @@ export function planProject(project: Project): CamResult {
       if (source.length && !region.length) warnings.push(`Corner radius too large for ${shape.name}`)
       if (region.length && shape.cut!.pocketFillet !== 'none' && filletRadius && !inflate(region, -filletRadius).length)
         warnings.push(`Bottom fillet radius too large for ${shape.name}`)
-      return { shape, region, profileRegion: region, depth, fillet: shape.cut!.pocketFillet, filletRadius }
+      return { shape, region, profileRegion: region, depth, fillet: shape.cut!.pocketFillet, filletRadius, filletStepdown: shape.cut!.pocketFilletStepdown }
     })
   const pocketRegions = new Map(pocketShapes.map((p) => [p.shape.id, p.region]))
   const pockets = pocketShapes.filter((p) => p.region.length)

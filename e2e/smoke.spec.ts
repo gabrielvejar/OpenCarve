@@ -272,6 +272,11 @@ test('sets a rectangle to a pocket cut', async ({ page }) => {
   await filletRadius.fill('5')
   await filletRadius.press('Enter')
   await expect(filletRadius).toHaveValue('3.00') // clamped to the pocket depth
+  const filletStepdown = page.getByLabel('Fillet stepdown')
+  await expect(filletStepdown).toHaveValue('0.00')
+  await filletStepdown.fill('0.5')
+  await filletStepdown.press('Enter')
+  await expect(filletStepdown).toHaveValue('0.50')
   await fillet.getByRole('radio', { name: 'Convex' }).click()
   await expect(fillet.getByRole('radio', { name: 'Convex' })).toBeChecked()
   const pattern = page.getByLabel('Pocket pattern')

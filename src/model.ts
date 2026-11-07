@@ -142,6 +142,7 @@ export interface Cut {
   pocketRadius: number // requested radius for convex pocket corners, mm; the bit may impose a larger minimum
   pocketFillet: PocketFillet // stepped vertical transition between the pocket wall and floor
   pocketFilletRadius: number // horizontal and vertical extent of the bottom transition, mm
+  pocketFilletStepdown: number // 0 follows each bit's stepdown; a smaller value adds profile passes
   side: 'outside' | 'inside' | 'on'
   depth: number // mm from top; >= stock.thickness means through
   tabs: boolean
@@ -244,6 +245,7 @@ export const defaultCut = (thickness: number): Cut => ({
   pocketRadius: 0,
   pocketFillet: 'none',
   pocketFilletRadius: 0,
+  pocketFilletStepdown: 0,
   side: 'outside',
   depth: thickness,
   tabs: true,
@@ -264,6 +266,7 @@ export function validCut(s: Shape, cut: Cut, thickness: number): Cut {
     pocketAngle: ((cut.pocketAngle % 180) + 180) % 180,
     pocketRadius: Math.max(0, cut.pocketRadius),
     pocketFilletRadius: clamp(cut.pocketFilletRadius, 0, depth),
+    pocketFilletStepdown: Math.max(0, cut.pocketFilletStepdown),
     depth,
     tabCount: Math.max(1, Math.round(cut.tabCount)),
     tabWidth: Math.max(0.1, cut.tabWidth),

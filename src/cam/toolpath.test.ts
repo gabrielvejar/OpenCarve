@@ -108,6 +108,17 @@ describe('offset', () => {
     expect(concave.floor).toBeCloseTo(31, 1)
     expect(convex.floor).toBeCloseTo(31, 1)
   })
+  it('uses the bit stepdown by default and only adds fillet passes for a smaller shape stepdown', () => {
+    const levels = (pocketFilletStepdown: number) => {
+      const shape = { ...rect(40, 30), cut: { ...defaultCut(12), type: 'pocket' as const, depth: 6, pocketFillet: 'concave' as const, pocketFilletRadius: 4, pocketFilletStepdown } }
+      const p = project([shape], '1mm-endmill')
+      p.cutSettings.rough.stepdown = 2
+      return [...new Set(planProject(p).ops.flatMap((op) => op.segments.filter((s) => !s.rapid).flatMap((s) => s.points.map((point) => -point[2]))).filter((z) => z > 0))].sort((a, b) => a - b)
+    }
+    expect(levels(0)).toEqual([2, 4, 6])
+    expect(levels(5)).toEqual([2, 4, 6]) // the bit's 2 mm setting is the maximum
+    expect(levels(0.5)).toEqual([2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6])
+  })
 })
 
 describe('passes and tabs', () => {

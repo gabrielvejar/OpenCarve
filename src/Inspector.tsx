@@ -96,7 +96,7 @@ export function Segmented<T extends string>(props: { label: string; value: strin
 
 function CutSection({ selected }: { selected: Shape[] }) {
   const project = useAppStore((s) => s.project)
-  const { stock, bits, units } = project
+  const { stock, bits, cutSettings, units } = project
   const st = useAppStore.getState
   const ids = selected.map((s) => s.id)
   const t = stock.thickness
@@ -116,6 +116,8 @@ function CutSection({ selected }: { selected: Shape[] }) {
   const type = shared((s) => s.cut?.type ?? 'none')
   const vcarve = type === 'vcarve'
   const bitChoice = shared((s) => s.cut?.bit ?? '')
+  const filletRoles = bitChoice === 'auto' || !bitChoice ? (pocketBits.length ? pocketBits : roles) : roles.filter((role) => role === bitChoice)
+  const maxFilletStepdown = Math.min(...filletRoles.map((role) => cutSettings[role]!.stepdown))
   const roleBit = bitChoice !== 'auto' && bits[bitChoice as BitRole] ? effectiveBit(project, bitChoice as BitRole) : null
   const vBit = bitChoice === 'auto' || !bitChoice ? vcarveBit(project) : roleBit?.type === 'vbit' ? roleBit : null
   const maxDepth = vcarve ? Math.min(t - 0.5, vBit ? vbitMaxDepth(vBit) : t - 0.5) : t
@@ -225,9 +227,18 @@ function CutSection({ selected }: { selected: Shape[] }) {
                     if (pocketFilletRadius !== null && Number.isFinite(pocketFilletRadius) && pocketFilletRadius >= 0) setCut({ pocketFilletRadius })
                   }}
                 />
+                <Field
+                  label="Fillet stepdown"
+                  value={shared((s) => formatLength(s.cut!.pocketFilletStepdown, units))}
+                  step={units === 'in' ? 0.01 : 0.1}
+                  onCommit={(text) => {
+                    const pocketFilletStepdown = parseLength(text, units)
+                    if (pocketFilletStepdown !== null && Number.isFinite(pocketFilletStepdown) && pocketFilletStepdown >= 0) setCut({ pocketFilletStepdown })
+                  }}
+                />
               </div>
               <p className="hint">
-                Concave leaves a standard inside fillet; Convex uses the opposite rounded ramp. Flat cutters leave fine terraces; a ballnose gives a smoother finish.
+                Concave leaves a standard inside fillet; Convex uses the opposite rounded ramp. Fillet stepdown is capped at {formatLength(maxFilletStepdown, units)} {units} by the selected bit{filletRoles.length === 1 ? '' : 's'}; 0 uses each bit setting.
               </p>
             </>
           )}
